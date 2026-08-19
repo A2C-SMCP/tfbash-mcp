@@ -1,0 +1,19 @@
+.DS_Store
+.idea/
+.vscode/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local research checkouts are large, contain nested repositories, and are not
+# part of the distributable project.
+reference/
