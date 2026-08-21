@@ -63,7 +63,7 @@ Windows-checkout runner script hash.
 | Text stdin | 1/1 | UTF-8 input and ConPTY echo matched exactly |
 | NUL stdin probe | 1/1 | NUL + CRLF and caret echo matched; API remains Unicode-string based |
 | Long command/yield | 0/1 | Ctrl-C did not restore the prompt; verified forced cleanup was required |
-| Backpressure/control | 0/1 | 16 MiB write completed before pressure was established; control contract not demonstrated |
+| Backpressure/control | 0/1 | 16 MiB write attempt returned `0` and ceased pending before pressure was established; control path not exercised |
 | Rapid-exit tail | 0/20 | Exactly 12,344 of 262,144 payload characters arrived; sentinel absent 20/20 |
 | Interrupt/rebuild <=3s | 0/20 | Prompt recovery and bounded rebuild both missed the deadline |
 | Timeout cleanup/rebuild | 20/20 | Original identities exited and replacement probe succeeded |
