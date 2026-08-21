@@ -26,7 +26,7 @@ Windows 11 x64 machine. From the repository root, run:
 
 ```powershell
 uv run --python 3.12 --with pywinpty==3.0.5 -- `
-  python experiments/windows_phase0/runner.py `
+  python -m experiments.windows_phase0.runner `
   --environment-tier native-gate `
   --repetitions 20 `
   --output-dir artifacts/windows-phase0-native

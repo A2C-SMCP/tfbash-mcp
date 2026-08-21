@@ -49,7 +49,7 @@ jobs:
         shell: pwsh
         run: |
           uv run --python 3.12 --with pywinpty==3.0.5 -- `
-            python experiments/windows_phase0/runner.py `
+            python -m experiments.windows_phase0.runner `
             --environment-tier hosted-smoke `
             --pwsh $env:PHASE0_PWSH `
             --repetitions 20 `

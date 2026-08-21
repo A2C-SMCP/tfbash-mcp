@@ -1,6 +1,6 @@
 """Execute the pre-registered Windows V1 Phase 0 experiment.
 
-Run with ``uv run experiments/windows_phase0/runner.py --help`` on Windows.
+Run as ``python -m experiments.windows_phase0.runner --help`` on Windows.
 The script intentionally uses pywinpty's low-level PTY API rather than the
 high-level PtyProcess compatibility wrapper, whose fixed sleeps would pollute
 the event-driven transport and lifecycle observations.
