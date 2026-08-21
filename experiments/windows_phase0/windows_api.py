@@ -20,6 +20,7 @@ SYNCHRONIZE: Final = 0x00100000
 WAIT_OBJECT_0: Final = 0x00000000
 WAIT_TIMEOUT: Final = 0x00000102
 INFINITE: Final = 0xFFFFFFFF
+STILL_ACTIVE: Final = 259
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: Final = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: Final = 9
 ERROR_NO_MORE_FILES: Final = 18
@@ -135,6 +136,8 @@ def _kernel32() -> ctypes.WinDLL:
         ctypes.POINTER(FILETIME),
     )
     kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
     kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     kernel32.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W))
@@ -193,6 +196,52 @@ def _filetime_value(value: FILETIME) -> int:
     return (value.dwHighDateTime << 32) | value.dwLowDateTime
 
 
+def _identity_from_handle(process: OwnedHandle, pid: int) -> ProcessIdentity:
+    created = FILETIME()
+    exited = FILETIME()
+    kernel = FILETIME()
+    user = FILETIME()
+    if not process._kernel32.GetProcessTimes(
+        ctypes.c_void_p(process.value),
+        ctypes.byref(created),
+        ctypes.byref(exited),
+        ctypes.byref(kernel),
+        ctypes.byref(user),
+    ):
+        _raise_last_error(f"GetProcessTimes({pid}) failed")
+    return ProcessIdentity(pid=pid, creation_time_100ns=_filetime_value(created))
+
+
+def _exit_code_from_handle(process: OwnedHandle, pid: int) -> int:
+    exit_code = wintypes.DWORD()
+    if not process._kernel32.GetExitCodeProcess(
+        ctypes.c_void_p(process.value), ctypes.byref(exit_code)
+    ):
+        _raise_last_error(f"GetExitCodeProcess({pid}) failed")
+    return int(exit_code.value)
+
+
+def _open_matching_process(identity: ProcessIdentity, access: int) -> OwnedHandle | None:
+    """Open the exact live process and retain its handle as a PID-reuse fence."""
+
+    try:
+        process = open_process(
+            identity.pid,
+            access | PROCESS_QUERY_LIMITED_INFORMATION,
+        )
+    except OSError:
+        return None
+    try:
+        current = _identity_from_handle(process, identity.pid)
+        if current != identity or _exit_code_from_handle(process, identity.pid) != STILL_ACTIVE:
+            process.close()
+            return None
+    except OSError:
+        process.close()
+        return None
+    return process
+
+
 def open_process(pid: int, access: int) -> OwnedHandle:
     """Open a process using an explicit least-privilege access mask."""
 
@@ -208,29 +257,17 @@ def process_identity(pid: int) -> ProcessIdentity:
     """Capture a process identity that remains safe across PID reuse."""
 
     with open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION) as process:
-        created = FILETIME()
-        exited = FILETIME()
-        kernel = FILETIME()
-        user = FILETIME()
-        if not process._kernel32.GetProcessTimes(
-            ctypes.c_void_p(process.value),
-            ctypes.byref(created),
-            ctypes.byref(exited),
-            ctypes.byref(kernel),
-            ctypes.byref(user),
-        ):
-            _raise_last_error(f"GetProcessTimes({pid}) failed")
-    return ProcessIdentity(pid=pid, creation_time_100ns=_filetime_value(created))
+        return _identity_from_handle(process, pid)
 
 
 def identity_is_alive(identity: ProcessIdentity) -> bool:
     """Return true only if the same process creation identity is still alive."""
 
-    try:
-        current = process_identity(identity.pid)
-    except OSError:
+    process = _open_matching_process(identity, 0)
+    if process is None:
         return False
-    return current == identity
+    process.close()
+    return True
 
 
 def process_snapshot() -> tuple[ProcessEntry, ...]:
@@ -294,11 +331,8 @@ def wait_for_exit(identities: Iterable[ProcessIdentity], timeout_seconds: float)
     handles: list[OwnedHandle] = []
     try:
         for identity in identities:
-            if not identity_is_alive(identity):
-                continue
-            try:
-                handle = open_process(identity.pid, SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)
-            except OSError:
+            handle = _open_matching_process(identity, SYNCHRONIZE)
+            if handle is None:
                 continue
             handles.append(handle)
 
@@ -327,24 +361,38 @@ def taskkill_tree(
 ) -> dict[str, object]:
     """Terminate an identity-fenced Toolhelp tree using the candidate A mechanism."""
 
-    discovered = descendant_identities(root)
-    if not identity_is_alive(root):
+    root_guard = _open_matching_process(root, SYNCHRONIZE)
+    if root_guard is None:
+        discovered = descendant_identities(root)
         return {"returncode": 0, "discovered": len(discovered), "all_exited": True}
-    command = ["taskkill", "/PID", str(root.pid), "/T"]
-    if force:
-        command.append("/F")
-    started = monotonic()
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    identities = (root, *discovered)
-    all_exited = wait_for_exit(identities, max(0.0, timeout_seconds - (monotonic() - started)))
-    return {
-        "returncode": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
-        "discovered": len(discovered),
-        "all_exited": all_exited,
-        "survivors": [identity.pid for identity in identities if identity_is_alive(identity)],
-    }
+    guards = [root_guard]
+    try:
+        discovered = descendant_identities(root)
+        identities = (root, *discovered)
+        for identity in discovered:
+            guard = _open_matching_process(identity, SYNCHRONIZE)
+            if guard is not None:
+                guards.append(guard)
+        command = ["taskkill", "/PID", str(root.pid), "/T"]
+        if force:
+            command.append("/F")
+        started = monotonic()
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        all_exited = wait_for_exit(
+            identities,
+            max(0.0, timeout_seconds - (monotonic() - started)),
+        )
+        return {
+            "returncode": completed.returncode,
+            "stdout": completed.stdout.strip(),
+            "stderr": completed.stderr.strip(),
+            "discovered": len(discovered),
+            "all_exited": all_exited,
+            "survivors": [identity.pid for identity in identities if identity_is_alive(identity)],
+        }
+    finally:
+        for guard in guards:
+            guard.close()
 
 
 class KillOnCloseJob:
