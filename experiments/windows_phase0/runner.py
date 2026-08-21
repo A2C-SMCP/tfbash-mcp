@@ -295,8 +295,11 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
     source = f"import threading\nprint({ready!r}, flush=True)\nthreading.Event().wait(60)"
     ticket = session.start_script(_python_command(source))
     session.wait_for_text(ready, ticket.cursor, 5.0)
+    shell_identity = process_identity(session.pid)
     write_result: dict[str, object] = {}
     write_done = threading.Event()
+    control_result: dict[str, object] = {}
+    control_done = threading.Event()
 
     def write_payload() -> None:
         try:
@@ -308,15 +311,53 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
 
     writer = threading.Thread(target=write_payload, name="phase0-backpressure-writer", daemon=True)
     writer.start()
+
+    def send_control() -> None:
+        try:
+            control_result["accepted_characters"] = session.interrupt()
+        except Exception as exc:
+            control_result["control_error"] = repr(exc)
+        finally:
+            control_done.set()
+
+    controller = threading.Thread(
+        target=send_control,
+        name="phase0-backpressure-controller",
+        daemon=True,
+    )
     started = monotonic()
-    session.interrupt()
-    result = session.await_script(ticket, CONTROL_DEADLINE_SECONDS)
-    control_ms = round((monotonic() - started) * 1000)
+    controller.start()
+    control_finished = control_done.wait(CONTROL_DEADLINE_SECONDS)
+    control_call_ms = round((monotonic() - started) * 1000)
+    recovered = False
+    exit_code: int | None = None
+    if control_finished:
+        remaining = max(0.0, CONTROL_DEADLINE_SECONDS - (monotonic() - started))
+        try:
+            result = session.await_script(ticket, remaining)
+            exit_code = result.exit_code
+            recovered = result.exit_code != 0
+        except (EOFError, RuntimeError, TimeoutError) as exc:
+            control_result["recovery_error"] = repr(exc)
+    if not recovered:
+        control_result["cleanup"] = taskkill_tree(
+            shell_identity,
+            force=True,
+            timeout_seconds=TREE_DEADLINE_SECONDS,
+        )
+        with suppress(Exception):
+            session.cancel_reader()
+    recovery_ms = round((monotonic() - started) * 1000)
     writer_finished = write_done.wait(1.0)
     return {
-        "passed": control_ms <= 3000 and result.exit_code != 0,
-        "control_ms": control_ms,
+        "passed": control_finished and recovery_ms <= 3000 and recovered,
+        "control_call_ms": control_call_ms,
+        "recovery_ms": recovery_ms,
+        "control_finished": control_finished,
+        "recovered": recovered,
+        "exit_code": exit_code,
         "writer_finished": writer_finished,
+        **control_result,
         **write_result,
     }
 
