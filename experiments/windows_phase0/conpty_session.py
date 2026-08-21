@@ -9,6 +9,23 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
+from typing import Protocol
+
+
+class PtyLike(Protocol):
+    """Subset of the low-level pywinpty PTY used by the experiment."""
+
+    pid: int | None
+
+    def write(self, value: str) -> int: ...
+
+    def read(self, *, blocking: bool) -> str: ...
+
+    def cancel_io(self) -> None: ...
+
+    def iseof(self) -> bool: ...
+
+    def isalive(self) -> bool: ...
 
 
 def powershell_literal(value: str) -> str:
@@ -42,6 +59,34 @@ class CommandResult:
     output: str
     exit_code: int
     duration_ms: int
+    raw_output: str
+
+
+def parse_command_output(raw_output: str, ticket: CommandTicket) -> tuple[str, int]:
+    """Extract only command output from the marker-delimited PTY transcript."""
+
+    begin_offset = raw_output.find(ticket.begin_marker)
+    if begin_offset < 0:
+        raise RuntimeError("PowerShell prompt arrived without a begin marker")
+    output_start = begin_offset + len(ticket.begin_marker)
+    if raw_output.startswith("\r\n", output_start):
+        output_start += 2
+    elif raw_output.startswith("\n", output_start):
+        output_start += 1
+    else:
+        raise RuntimeError("PowerShell begin marker was not line-delimited")
+
+    marker_offset = raw_output.find(ticket.end_marker, output_start)
+    if marker_offset < 0:
+        raise RuntimeError("PowerShell prompt arrived without an exit marker")
+    code_start = marker_offset + len(ticket.end_marker)
+    code_text = raw_output[code_start:].splitlines()[0].strip()
+    if not code_text.isdigit():
+        raise RuntimeError(f"invalid PowerShell exit marker payload: {code_text!r}")
+    prompt_offset = raw_output.find(ticket.prompt_marker, code_start + len(code_text))
+    if prompt_offset < 0:
+        raise RuntimeError("PowerShell exit marker arrived without the following prompt")
+    return raw_output[output_start:marker_offset], int(code_text)
 
 
 class ConPtySession:
@@ -54,9 +99,10 @@ class ConPtySession:
         self._output = ""
         self._reader_error: str | None = None
         self._reader_done = False
-        self._pty: object | None = None
+        self._pty: PtyLike | None = None
         self._reader: threading.Thread | None = None
         self._prompt_marker = f"__TF_PROMPT_{uuid.uuid4().hex}__"
+        self._terminal_query_tail = ""
 
     @property
     def pid(self) -> int:
@@ -182,18 +228,13 @@ class ConPtySession:
         started = monotonic()
         # The marker prefix and its numeric payload may span separate PTY reads.
         # The following prompt proves that the complete marker line has arrived.
-        output = self.wait_for_text(ticket.prompt_marker, ticket.cursor, timeout_seconds)
-        marker_offset = output.rfind(ticket.end_marker)
-        if marker_offset < 0:
-            raise RuntimeError("PowerShell prompt arrived without an exit marker")
-        code_start = marker_offset + len(ticket.end_marker)
-        code_text = output[code_start:].splitlines()[0].strip()
-        if not code_text.isdigit():
-            raise RuntimeError(f"invalid PowerShell exit marker payload: {code_text!r}")
+        raw_output = self.wait_for_text(ticket.prompt_marker, ticket.cursor, timeout_seconds)
+        output, exit_code = parse_command_output(raw_output, ticket)
         return CommandResult(
             output=output,
-            exit_code=int(code_text),
+            exit_code=exit_code,
             duration_ms=round((monotonic() - started) * 1000),
+            raw_output=raw_output,
         )
 
     def run_script(self, script: str, timeout_seconds: float = 15.0) -> CommandResult:
@@ -215,10 +256,14 @@ class ConPtySession:
             if not self.wait_for_eof(timeout_seconds):
                 with suppress(Exception):
                     self.cancel_reader()
-                self.wait_for_eof(timeout_seconds)
+                if not self.wait_for_eof(timeout_seconds):
+                    raise TimeoutError("ConPTY reader did not terminate after cancellation")
+        pty = self._require_pty()
+        if pty.isalive():
+            raise RuntimeError("ConPTY process remained alive after close")
         self._pty = None
 
-    def _require_pty(self) -> object:
+    def _require_pty(self) -> PtyLike:
         if self._pty is None:
             raise RuntimeError("ConPTY session has not been started or is already closed")
         return self._pty
@@ -247,10 +292,12 @@ class ConPtySession:
 
     def _answer_terminal_queries(self, chunk: str) -> None:
         # ConPTY can block application startup while waiting for terminal-status replies.
-        if "\x1b[5n" in chunk:
+        combined = self._terminal_query_tail + chunk
+        for _ in range(combined.count("\x1b[5n")):
             self.write("\x1b[0n")
-        if "\x1b[6n" in chunk:
+        for _ in range(combined.count("\x1b[6n")):
             self.write("\x1b[1;1R")
+        self._terminal_query_tail = combined[-3:]
 
     def __enter__(self) -> ConPtySession:
         self.start()

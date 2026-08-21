@@ -21,7 +21,7 @@ state with no late output.
 
 ## Run the native gate
 
-Install Python 3.12, [uv](https://docs.astral.sh/uv/), and PowerShell 7.6.x on a
+Install Python 3.12.10, uv 0.8.17, and PowerShell 7.6.x on a
 Windows 11 x64 machine. From the repository root, run:
 
 ```powershell
@@ -31,7 +31,7 @@ Windows 11 x64 machine. From the repository root, run:
 The script is equivalent to:
 
 ```powershell
-uv run --python 3.12 --with pywinpty==3.0.5 -- `
+uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
   python -m experiments.windows_phase0.runner `
   --environment-tier native-gate `
   --repetitions 20 `

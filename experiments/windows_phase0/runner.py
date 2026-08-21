@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
+import ntpath
 import os
 import platform
 import re
@@ -36,6 +38,7 @@ from experiments.windows_phase0.contracts import (
     Outcome,
     evaluate_gates,
     summary_payload,
+    validate_environment,
 )
 from experiments.windows_phase0.windows_api import (
     KillOnCloseJob,
@@ -50,10 +53,46 @@ from experiments.windows_phase0.windows_api import (
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 TREE_FIXTURE = EXPERIMENT_DIR / "tree_fixture.py"
+LATE_OUTPUT_FIXTURE = EXPERIMENT_DIR / "late_output_fixture.py"
 CONTROL_DEADLINE_SECONDS = 3.0
 SOFT_INTERRUPT_SECONDS = 0.75
 TREE_DEADLINE_SECONDS = 10.0
+LIFECYCLE_DEADLINE_SECONDS = 30.0
 TAIL_BYTES = 262_144
+BACKPRESSURE_BYTES = 16 * 1024 * 1024
+BACKPRESSURE_ESTABLISH_SECONDS = 0.25
+VT_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+
+
+def _normalized_output(value: str) -> str:
+    return VT_SEQUENCE.sub("", value).replace("\r\n", "\n")
+
+
+def _resolve_runner_commit(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    if os.environ.get("GITHUB_SHA"):
+        return os.environ["GITHUB_SHA"]
+    completed = subprocess.run(
+        ["git", "-C", str(EXPERIMENT_DIR.parents[1]), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else "unavailable"
+
+
+def _command_version(command: str) -> str:
+    executable = shutil.which(command)
+    if executable is None:
+        return "unavailable"
+    completed = subprocess.run(
+        [executable, "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else "unavailable"
 
 
 def _python_command(source: str, *arguments: str) -> str:
@@ -197,25 +236,37 @@ def _unicode_scenario(session: ConPtySession) -> dict[str, object]:
     expected = "中文😀 café"
     result = session.run_script(f"[Console]::Out.WriteLine({powershell_literal(expected)})")
     return {
-        "passed": expected in result.output,
+        "passed": result.exit_code == 0 and _normalized_output(result.output) == expected + "\n",
         "expected": expected,
+        "observed": _normalized_output(result.output),
         "exit_code": result.exit_code,
     }
 
 
 def _persistent_state_scenario(session: ConPtySession) -> dict[str, object]:
     token = uuid.uuid4().hex
-    session.run_script(
-        f"$env:TF_PHASE0_STATE = {powershell_literal(token)}; Set-Location $env:TEMP"
+    setup = session.run_script(
+        f"$env:TF_PHASE0_STATE = {powershell_literal(token)}; "
+        "$global:TF_PHASE0_EXPECTED_CWD = (Resolve-Path $env:TEMP).Path; "
+        "Set-Location $global:TF_PHASE0_EXPECTED_CWD"
     )
     result = session.run_script(
-        "[Console]::Out.WriteLine('STATE=' + $env:TF_PHASE0_STATE); "
-        "[Console]::Out.WriteLine('CWD=' + (Get-Location).Path)"
+        "[ordered]@{State=$env:TF_PHASE0_STATE; Cwd=(Get-Location).Path; "
+        "ExpectedCwd=$global:TF_PHASE0_EXPECTED_CWD} | ConvertTo-Json -Compress"
     )
+    observed = json.loads(_normalized_output(result.output).strip())
+    cwd = ntpath.normcase(ntpath.normpath(str(observed["Cwd"])))
+    expected_cwd = ntpath.normcase(ntpath.normpath(str(observed["ExpectedCwd"])))
     return {
-        "passed": f"STATE={token}" in result.output and "CWD=" in result.output,
-        "state_seen": f"STATE={token}" in result.output,
-        "cwd_seen": "CWD=" in result.output,
+        "passed": (
+            setup.exit_code == 0
+            and result.exit_code == 0
+            and observed["State"] == token
+            and cwd == expected_cwd
+        ),
+        "setup_exit_code": setup.exit_code,
+        "probe_exit_code": result.exit_code,
+        "observed": observed,
     }
 
 
@@ -225,12 +276,22 @@ def _multiline_scenario(session: ConPtySession) -> dict[str, object]:
         "$values = @(\n  'line-1'\n  'line-2'\n  'line-3'\n)\n"
         "[Console]::Out.WriteLine(($values -join '|'))"
     )
-    return {"passed": expected in result.output, "expected": expected}
+    observed = _normalized_output(result.output)
+    return {
+        "passed": result.exit_code == 0 and observed == expected + "\n",
+        "expected": expected,
+        "observed": observed,
+        "exit_code": result.exit_code,
+    }
 
 
 def _exit_code_scenario(session: ConPtySession) -> dict[str, object]:
     result = session.run_script("& $env:ComSpec /d /c exit 37")
-    return {"passed": result.exit_code == 37, "observed_exit_code": result.exit_code}
+    return {
+        "passed": result.exit_code == 37 and _normalized_output(result.output) == "",
+        "observed_exit_code": result.exit_code,
+        "observed_output": _normalized_output(result.output),
+    }
 
 
 def _text_stdin_scenario(session: ConPtySession) -> dict[str, object]:
@@ -248,7 +309,14 @@ def _text_stdin_scenario(session: ConPtySession) -> dict[str, object]:
     session.write(expected + "\r\n")
     result = session.await_script(ticket, 5.0)
     encoded = base64.b64encode((expected + "\r\n").encode()).decode()
-    return {"passed": done + encoded in result.output, "expected_base64": encoded}
+    observed = _normalized_output(result.output)
+    expected_output = f"{ready}\n{done}{encoded}\n"
+    return {
+        "passed": result.exit_code == 0 and observed == expected_output,
+        "expected_base64": encoded,
+        "observed": observed,
+        "exit_code": result.exit_code,
+    }
 
 
 def _raw_nul_scenario(session: ConPtySession) -> dict[str, object]:
@@ -265,9 +333,13 @@ def _raw_nul_scenario(session: ConPtySession) -> dict[str, object]:
     session.write("\x00\r\n")
     result = session.await_script(ticket, 5.0)
     expected = base64.b64encode(b"\x00\r\n").decode()
+    observed = _normalized_output(result.output)
+    expected_output = f"{ready}\n{done}{expected}\n"
     return {
-        "passed": done + expected in result.output,
+        "passed": result.exit_code == 0 and observed == expected_output,
         "expected_base64": expected,
+        "observed": observed,
+        "exit_code": result.exit_code,
         "api_constraint": "pywinpty accepts Unicode strings, not an arbitrary byte buffer",
     }
 
@@ -298,13 +370,15 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
     session.wait_for_text(ready, ticket.cursor, 5.0)
     shell_identity = process_identity(session.pid)
     write_result: dict[str, object] = {}
+    writer_started = threading.Event()
     write_done = threading.Event()
     control_result: dict[str, object] = {}
     control_done = threading.Event()
 
     def write_payload() -> None:
+        writer_started.set()
         try:
-            write_result["accepted_characters"] = session.write("x" * 1_048_576)
+            write_result["accepted_characters"] = session.write("x" * BACKPRESSURE_BYTES)
         except Exception as exc:
             write_result["write_error"] = repr(exc)
         finally:
@@ -312,6 +386,9 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
 
     writer = threading.Thread(target=write_payload, name="phase0-backpressure-writer", daemon=True)
     writer.start()
+    if not writer_started.wait(1.0):
+        raise RuntimeError("backpressure writer did not start")
+    backpressure_established = not write_done.wait(BACKPRESSURE_ESTABLISH_SECONDS)
 
     def send_control() -> None:
         try:
@@ -321,14 +398,17 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
         finally:
             control_done.set()
 
-    controller = threading.Thread(
-        target=send_control,
-        name="phase0-backpressure-controller",
-        daemon=True,
-    )
     started = monotonic()
-    controller.start()
-    control_finished = control_done.wait(CONTROL_DEADLINE_SECONDS)
+    if backpressure_established:
+        controller = threading.Thread(
+            target=send_control,
+            name="phase0-backpressure-controller",
+            daemon=True,
+        )
+        controller.start()
+        control_finished = control_done.wait(CONTROL_DEADLINE_SECONDS)
+    else:
+        control_finished = False
     control_call_ms = round((monotonic() - started) * 1000)
     recovered = False
     exit_code: int | None = None
@@ -351,7 +431,11 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
     recovery_ms = round((monotonic() - started) * 1000)
     writer_finished = write_done.wait(1.0)
     return {
-        "passed": control_finished and recovery_ms <= 3000 and recovered,
+        "passed": (
+            backpressure_established and control_finished and recovery_ms <= 3000 and recovered
+        ),
+        "backpressure_established": backpressure_established,
+        "payload_characters": BACKPRESSURE_BYTES,
         "control_call_ms": control_call_ms,
         "recovery_ms": recovery_ms,
         "control_finished": control_finished,
@@ -363,61 +447,157 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
     }
 
 
-def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
-    session = ConPtySession(pwsh)
-    try:
-        session.start()
-        previous_tail: str | None = None
-        for iteration in range(1, repetitions + 1):
-            started = monotonic()
-            tail = f"TAIL_{iteration}_{uuid.uuid4().hex}"
-            try:
-                source = (
-                    f"import sys\nsys.stdout.write('x'*{TAIL_BYTES}+{tail!r})\nsys.stdout.flush()"
-                )
-                ticket = session.start_script(_python_command(source))
-                result = session.await_script(ticket, 15.0)
-                tail_count = result.output.count(tail)
-                log.add(
-                    "tail_drain",
-                    iteration,
-                    tail_count == 1,
-                    round((monotonic() - started) * 1000),
-                    {"tail_count": tail_count, "output_characters": len(result.output)},
-                )
+def _late_fixture_command(event_name: str, before_wait_token: str, after_wait_token: str) -> str:
+    return " ".join(
+        (
+            "&",
+            powershell_literal(sys.executable),
+            "-u",
+            powershell_literal(str(LATE_OUTPUT_FIXTURE)),
+            "--event",
+            powershell_literal(event_name),
+            "--before-wait-token",
+            powershell_literal(before_wait_token),
+            "--after-wait-token",
+            powershell_literal(after_wait_token),
+        )
+    )
 
-                next_token = f"NEXT_{uuid.uuid4().hex}"
-                next_result = session.run_script(
-                    f"[Console]::Out.WriteLine({powershell_literal(next_token)})"
-                )
-                unique = (
-                    result.output.count(ticket.end_marker) == 1
-                    and next_result.output.count(next_token) == 1
-                    and (previous_tail is None or previous_tail not in result.output)
-                    and tail not in next_result.output
-                )
-                log.add(
-                    "unique_terminal_state",
-                    iteration,
-                    unique,
-                    round((monotonic() - started) * 1000),
-                    {
-                        "terminal_marker_count": result.output.count(ticket.end_marker),
-                        "next_marker_count": next_result.output.count(next_token),
-                        "late_tail_seen": tail in next_result.output,
-                    },
-                )
-                previous_tail = tail
-            except Exception as exc:
-                log.failed("tail_drain", iteration, started, exc)
-                log.failed("unique_terminal_state", iteration, started, exc)
-                _safe_kill_session(session)
-                return
-    finally:
+
+def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
+    session = ConPtySession(pwsh)
+    late_identity: ProcessIdentity | None = None
+    with (
+        NamedManualResetEvent(f"Local\\tfbash-late-{uuid.uuid4().hex}") as late_release,
+        NamedManualResetEvent(f"Local\\tfbash-next-{uuid.uuid4().hex}") as next_finish,
+    ):
+        late_ready = f"LATE_READY_{uuid.uuid4().hex}"
+        late_token = f"LATE_OUTPUT_{uuid.uuid4().hex}"
+        spawn_marker = f"LATE_PID_{uuid.uuid4().hex}="
+        next_ready = f"NEXT_READY_{uuid.uuid4().hex}"
+        next_done = f"NEXT_DONE_{uuid.uuid4().hex}"
+        source = (
+            "import subprocess,sys\n"
+            "process=subprocess.Popen([sys.executable,'-u',sys.argv[1],"
+            "'--event',sys.argv[2],'--before-wait-token',sys.argv[3],"
+            "'--after-wait-token',sys.argv[4]],stdin=subprocess.DEVNULL)\n"
+            f"print({spawn_marker!r}+str(process.pid), flush=True)"
+        )
         try:
-            session.close()
-        except Exception:
+            session.start()
+            first_ticket = session.start_script(
+                _python_command(
+                    source,
+                    str(LATE_OUTPUT_FIXTURE),
+                    late_release.name,
+                    late_ready,
+                    late_token,
+                )
+            )
+            session.wait_for_text(late_ready, first_ticket.cursor, 5.0)
+            first_result = session.await_script(first_ticket, 5.0)
+            match = re.search(re.escape(spawn_marker) + r"(\d+)", first_result.output)
+            if match is None:
+                raise RuntimeError("late-output child PID marker was missing")
+            late_identity = process_identity(int(match.group(1)))
+
+            next_ticket = session.start_script(
+                _late_fixture_command(next_finish.name, next_ready, next_done)
+            )
+            session.wait_for_text(next_ready, next_ticket.cursor, 5.0)
+            late_release.set()
+            late_exited = wait_for_exit((late_identity,), 5.0)
+            if not late_exited:
+                raise TimeoutError("late-output child did not exit after release")
+            next_finish.set()
+            next_result = session.await_script(next_ticket, 5.0)
+
+            first_terminal_count = first_result.raw_output.count(first_ticket.end_marker)
+            next_terminal_count = next_result.raw_output.count(next_ticket.end_marker)
+            late_contaminated_next = late_token in next_result.output
+            passed = (
+                first_result.exit_code == 0
+                and next_result.exit_code == 0
+                and first_terminal_count == 1
+                and next_terminal_count == 1
+                and next_result.output.count(next_ready) == 1
+                and next_result.output.count(next_done) == 1
+                and not late_contaminated_next
+            )
+            return {
+                "passed": passed,
+                "first_terminal_count": first_terminal_count,
+                "next_terminal_count": next_terminal_count,
+                "next_ready_count": next_result.output.count(next_ready),
+                "next_done_count": next_result.output.count(next_done),
+                "late_contaminated_next_execution": late_contaminated_next,
+                "late_child_exited_before_next_finished": late_exited,
+                "late_pid": late_identity.pid,
+                "contract": "output emitted after terminal must not enter the next execution",
+            }
+        finally:
+            late_release.set()
+            next_finish.set()
+            if late_identity is not None:
+                with suppress(OSError):
+                    wait_for_exit((late_identity,), 2.0)
+                if identity_is_alive(late_identity):
+                    with suppress(OSError):
+                        taskkill_tree(late_identity, force=True, timeout_seconds=2.0)
+            try:
+                session.close()
+            except Exception:
+                _safe_kill_session(session)
+
+
+def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
+    for iteration in range(1, repetitions + 1):
+        started = monotonic()
+        tail = f"TAIL_{iteration}_{uuid.uuid4().hex}"
+        session = ConPtySession(pwsh)
+        try:
+            session.start()
+            source = f"import sys\nsys.stdout.write('x'*{TAIL_BYTES}+{tail!r})\nsys.stdout.flush()"
+            ticket = session.start_script(_python_command(source))
+            result = session.await_script(ticket, 15.0)
+            tail_count = result.output.count(tail)
+            exact_output = result.output == "x" * TAIL_BYTES + tail
+            log.add(
+                "tail_drain",
+                iteration,
+                result.exit_code == 0 and tail_count == 1 and exact_output,
+                round((monotonic() - started) * 1000),
+                {
+                    "tail_count": tail_count,
+                    "output_characters": len(result.output),
+                    "expected_characters": TAIL_BYTES + len(tail),
+                    "exact_output": exact_output,
+                    "exit_code": result.exit_code,
+                },
+            )
+        except Exception as exc:
+            log.failed("tail_drain", iteration, started, exc)
             _safe_kill_session(session)
+        finally:
+            try:
+                session.close()
+            except Exception:
+                _safe_kill_session(session)
+
+    for iteration in range(1, repetitions + 1):
+        started = monotonic()
+        try:
+            details = _unique_terminal_scenario(pwsh)
+            passed = bool(details.pop("passed"))
+            log.add(
+                "unique_terminal_state",
+                iteration,
+                passed,
+                round((monotonic() - started) * 1000),
+                details,
+            )
+        except Exception as exc:
+            log.failed("unique_terminal_state", iteration, started, exc)
 
 
 def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
@@ -672,46 +852,104 @@ def _reported_identities(
     return identities, hierarchy
 
 
+def _rebuild_probe(pwsh: str, deadline: float) -> bool:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return False
+    rebuilt = ConPtySession(pwsh)
+    try:
+        rebuilt.start(timeout_seconds=remaining)
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        token = f"LIFECYCLE_REBUILT_{uuid.uuid4().hex}"
+        result = rebuilt.run_script(
+            f"[Console]::Out.WriteLine({powershell_literal(token)})",
+            remaining,
+        )
+        return result.exit_code == 0 and _normalized_output(result.output) == token + "\n"
+    finally:
+        try:
+            rebuilt.close()
+        except Exception:
+            _safe_kill_session(rebuilt)
+
+
 def _run_toolhelp_tree_once(pwsh: str, action: str) -> dict[str, object]:
     session = ConPtySession(pwsh)
+    session_closed = False
     with (
         TreeReporter() as reporter,
         NamedManualResetEvent(f"Local\\tfbash-phase0-{uuid.uuid4().hex}") as release,
     ):
         try:
             session.start()
-            ticket = session.start_script(_tree_command(reporter, release.name))
+            shell_identity = process_identity(session.pid)
+            session.start_script(_tree_command(reporter, release.name))
             reports = reporter.collect(3, 10.0)
             identities, hierarchy = _reported_identities(reports)
-            root = identities["parent"]
-            discovered = descendant_identities(root)
-            reported_descendants = {identities["child"].pid, identities["grandchild"].pid}
+            discovered = descendant_identities(shell_identity)
+            reported_descendants = {identity.pid for identity in identities.values()}
             toolhelp_pids = {identity.pid for identity in discovered}
             detected = reported_descendants <= toolhelp_pids
 
-            force = action in {"kill", "close", "shutdown"}
-            result = taskkill_tree(root, force=force, timeout_seconds=TREE_DEADLINE_SECONDS)
+            control_started = monotonic()
+            deadline = control_started + LIFECYCLE_DEADLINE_SECONDS
+            force = action != "terminate"
+            result = taskkill_tree(
+                shell_identity,
+                force=force,
+                timeout_seconds=max(0.001, deadline - monotonic()),
+            )
             escalated = False
-            if not bool(result["all_exited"]):
+            if not bool(result["all_exited"]) and monotonic() < deadline:
                 escalated = True
-                result = taskkill_tree(root, force=True, timeout_seconds=TREE_DEADLINE_SECONDS)
-            session.await_script(ticket, 5.0)
-            all_exited = all(not identity_is_alive(identity) for identity in identities.values())
+                result = taskkill_tree(
+                    shell_identity,
+                    force=True,
+                    timeout_seconds=max(0.001, deadline - monotonic()),
+                )
+            all_identities = (shell_identity, *identities.values())
+            all_exited = wait_for_exit(
+                all_identities,
+                max(0.0, deadline - monotonic()),
+            )
+            session.cancel_reader()
+            session.close()
+            session_closed = True
+            survivors = [identity.pid for identity in all_identities if identity_is_alive(identity)]
+            expected_rebuild = action in {"terminate", "kill"}
+            shell_rebuilt = _rebuild_probe(pwsh, deadline) if expected_rebuild else False
+            control_ms = round((monotonic() - control_started) * 1000)
             return {
-                "passed": hierarchy and detected and all_exited and bool(result["all_exited"]),
+                "passed": (
+                    hierarchy
+                    and detected
+                    and all_exited
+                    and not survivors
+                    and shell_rebuilt == expected_rebuild
+                ),
                 "hierarchy_valid": hierarchy,
                 "toolhelp_detected_reported_tree": detected,
                 "toolhelp_descendants": sorted(toolhelp_pids),
                 "reported_pids": {role: identity.pid for role, identity in identities.items()},
+                "shell_pid": shell_identity.pid,
                 "escalated": escalated,
                 "taskkill": result,
+                "all_exited": all_exited,
+                "survivors": survivors,
+                "expected_rebuild": expected_rebuild,
+                "shell_rebuilt": shell_rebuilt,
+                "session_closed_before_evaluation": session_closed,
+                "control_ms": control_ms,
             }
         finally:
             release.set()
-            try:
-                session.close()
-            except Exception:
-                _safe_kill_session(session)
+            if not session_closed:
+                try:
+                    session.close()
+                except Exception:
+                    _safe_kill_session(session)
 
 
 def _run_job_tree_once(pwsh: str, action: str) -> dict[str, object]:
@@ -727,46 +965,55 @@ def _run_job_tree_once(pwsh: str, action: str) -> dict[str, object]:
             assigned["shell"] = job.assign_pid(pid)
 
         session = ConPtySession(pwsh, before_bootstrap=assign)
+        session_closed = False
         try:
             session.start()
-            ticket = session.start_script(_tree_command(reporter, release.name))
+            session.start_script(_tree_command(reporter, release.name))
             reports = reporter.collect(3, 10.0)
             identities, hierarchy = _reported_identities(reports)
             all_identities = (assigned["shell"], *identities.values())
 
-            soft_recovered = False
-            if action == "terminate":
-                session.interrupt()
-                try:
-                    session.await_script(ticket, 0.5)
-                    soft_recovered = True
-                except TimeoutError:
-                    pass
+            control_started = monotonic()
+            deadline = control_started + LIFECYCLE_DEADLINE_SECONDS
             if action in {"close", "shutdown"}:
                 job.close()
             else:
                 job.terminate(137 if action == "kill" else 143)
-            all_exited = wait_for_exit(all_identities, TREE_DEADLINE_SECONDS)
+            all_exited = wait_for_exit(
+                all_identities,
+                max(0.0, deadline - monotonic()),
+            )
             session.cancel_reader()
+            session.close()
+            session_closed = True
             survivors = [identity.pid for identity in all_identities if identity_is_alive(identity)]
+            expected_rebuild = action in {"terminate", "kill"}
+            shell_rebuilt = _rebuild_probe(pwsh, deadline) if expected_rebuild else False
+            control_ms = round((monotonic() - control_started) * 1000)
             return {
-                "passed": hierarchy and all_exited and not survivors,
+                "passed": (
+                    hierarchy and all_exited and not survivors and shell_rebuilt == expected_rebuild
+                ),
                 "hierarchy_valid": hierarchy,
                 "reported_pids": {role: identity.pid for role, identity in identities.items()},
                 "shell_pid": assigned["shell"].pid,
-                "soft_recovered": soft_recovered,
                 "all_exited": all_exited,
                 "survivors": survivors,
+                "expected_rebuild": expected_rebuild,
+                "shell_rebuilt": shell_rebuilt,
+                "session_closed_before_evaluation": session_closed,
+                "control_ms": control_ms,
                 "ownership_boundary": (
                     "processes explicitly breaking away from the Job are unsupported"
                 ),
             }
         finally:
             release.set()
-            try:
-                session.close()
-            except Exception:
-                _safe_kill_session(session)
+            if not session_closed:
+                try:
+                    session.close()
+                except Exception:
+                    _safe_kill_session(session)
 
 
 def run_tree_gates(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
@@ -793,13 +1040,15 @@ def run_tree_gates(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
                     log.failed(scenario, iteration, started, exc)
 
 
-def collect_environment(pwsh: str, tier: EnvironmentTier) -> dict[str, object]:
+def collect_environment(pwsh: str, tier: EnvironmentTier, runner_commit: str) -> dict[str, object]:
     command = " ".join(
         (
             "$os = Get-CimInstance Win32_OperatingSystem;",
             "[ordered]@{",
             "Caption=$os.Caption; Version=$os.Version; OSArchitecture=$os.OSArchitecture;",
-            "ProductType=$os.ProductType; PowerShell=$PSVersionTable.PSVersion.ToString()",
+            "ProductType=$os.ProductType; PowerShell=$PSVersionTable.PSVersion.ToString();",
+            "RuntimeOSArchitecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();",
+            "RuntimeProcessArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()",
             "} | ConvertTo-Json -Compress",
         )
     )
@@ -817,18 +1066,13 @@ def collect_environment(pwsh: str, tier: EnvironmentTier) -> dict[str, object]:
         "python": platform.python_version(),
         "python_architecture": platform.machine(),
         "pywinpty": winpty.__version__,
+        "uv": _command_version("uv"),
         "platform": platform.platform(),
+        "runner_commit": runner_commit,
+        "runner_script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "windows": windows,
     }
-    version = str(windows["PowerShell"])
-    architecture = str(windows["OSArchitecture"])
-    caption = str(windows["Caption"])
-    if not version.startswith("7.6."):
-        raise RuntimeError(f"PowerShell 7.6.x is required, observed {version}")
-    if "64-bit" not in architecture:
-        raise RuntimeError(f"x64 Windows is required, observed {architecture}")
-    if tier is EnvironmentTier.NATIVE_GATE and "Windows 11" not in caption:
-        raise RuntimeError(f"native gate requires Windows 11, observed {caption}")
+    validate_environment(windows, tier)
     return environment
 
 
@@ -837,7 +1081,7 @@ def write_summary(
     tier: EnvironmentTier,
     environment: dict[str, object],
     observations: list[Observation],
-) -> bool:
+) -> None:
     summary = evaluate_gates(observations, tier)
     payload = summary_payload(summary)
     payload["environment"] = environment
@@ -849,8 +1093,10 @@ def write_summary(
         "# Windows Phase 0 experiment summary",
         "",
         f"- Environment tier: `{tier.value}`",
-        f"- All observed gates pass: `{summary.all_observed_gates_pass}`",
+        f"- Evidence complete: `{summary.evidence_complete}`",
+        f"- Contract passed: `{summary.contract_passed}`",
         f"- Decision ready: `{summary.decision_ready}`",
+        f"- Decision: `{summary.decision.value}`",
         "",
         "| Scenario | Passed | Failed | Skipped | Required | Accepted |",
         "|---|---:|---:|---:|---:|---|",
@@ -869,7 +1115,6 @@ def write_summary(
         )
     )
     (output_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
-    return summary.decision_ready
 
 
 def parse_args() -> argparse.Namespace:
@@ -885,6 +1130,10 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--repetitions", type=int, default=20)
+    parser.add_argument(
+        "--runner-commit",
+        help="Exact source commit; defaults to GITHUB_SHA or git rev-parse HEAD",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/windows-phase0"))
     return parser.parse_args()
 
@@ -900,7 +1149,11 @@ def main() -> int:
     tier = EnvironmentTier(args.environment_tier)
     output_dir: Path = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    environment = collect_environment(str(args.pwsh), tier)
+    environment = collect_environment(
+        str(args.pwsh),
+        tier,
+        _resolve_runner_commit(args.runner_commit),
+    )
     (output_dir / "environment.json").write_text(
         json.dumps(environment, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -916,11 +1169,9 @@ def main() -> int:
         run_timeout_rebuild_gate(log, str(args.pwsh), args.repetitions)
         run_tree_gates(log, str(args.pwsh), args.repetitions)
 
-    decision_ready = write_summary(output_dir, tier, environment, log.observations)
+    write_summary(output_dir, tier, environment, log.observations)
     summary = evaluate_gates(log.observations, tier)
-    if tier is EnvironmentTier.HOSTED_SMOKE:
-        return 0 if summary.all_observed_gates_pass else 1
-    return 0 if decision_ready else 1
+    return 0 if summary.contract_passed else 1
 
 
 if __name__ == "__main__":

@@ -25,6 +25,14 @@ class Outcome(str, Enum):
     SKIP = "skip"
 
 
+class Decision(str, Enum):
+    """Decision supported by the collected evidence."""
+
+    GO = "go"
+    NO_GO = "no-go"
+    INCONCLUSIVE = "inconclusive"
+
+
 @dataclass(frozen=True, slots=True)
 class Observation:
     """One independently auditable scenario observation."""
@@ -91,8 +99,38 @@ class DecisionSummary:
 
     environment_tier: EnvironmentTier
     gates: tuple[GateEvaluation, ...]
-    all_observed_gates_pass: bool
+    evidence_complete: bool
+    contract_passed: bool
     decision_ready: bool
+    decision: Decision
+
+
+def validate_environment(windows: dict[str, object], tier: EnvironmentTier) -> None:
+    """Validate the non-localized native evidence boundary."""
+
+    version = str(windows["PowerShell"])
+    os_architecture = str(windows["RuntimeOSArchitecture"])
+    process_architecture = str(windows["RuntimeProcessArchitecture"])
+    if not version.startswith("7.6."):
+        raise RuntimeError(f"PowerShell 7.6.x is required, observed {version}")
+    if os_architecture != "X64" or process_architecture != "X64":
+        raise RuntimeError(
+            "x64 OS and PowerShell process are required, observed "
+            f"OS={os_architecture}, process={process_architecture}"
+        )
+    if tier is EnvironmentTier.NATIVE_GATE:
+        product_type = int(windows["ProductType"])
+        parts = str(windows["Version"]).split(".")
+        try:
+            build = int(parts[2])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError(f"unrecognized Windows version: {windows['Version']}") from exc
+        if product_type != 1 or build < 22000:
+            raise RuntimeError(
+                "native gate requires Windows 11 client x64 "
+                f"(ProductType=1, build>=22000), observed ProductType={product_type}, "
+                f"build={build}"
+            )
 
 
 def evaluate_gates(
@@ -110,7 +148,9 @@ def evaluate_gates(
         passed = sum(value.outcome is Outcome.PASS for value in values)
         failed = sum(value.outcome is Outcome.FAIL for value in values)
         skipped = sum(value.outcome is Outcome.SKIP for value in values)
-        complete = len(values) == rule.required_runs
+        expected_iterations = set(range(1, rule.required_runs + 1))
+        observed_iterations = {value.iteration for value in values}
+        complete = len(values) == rule.required_runs and observed_iterations == expected_iterations
         accepted = complete and passed >= rule.required_passes and failed == 0 and skipped == 0
         evaluations.append(
             GateEvaluation(
@@ -125,13 +165,23 @@ def evaluate_gates(
             )
         )
 
-    all_pass = all(evaluation.accepted for evaluation in evaluations)
+    evidence_complete = all(evaluation.complete for evaluation in evaluations)
+    contract_passed = all(evaluation.accepted for evaluation in evaluations)
     native = environment_tier is EnvironmentTier.NATIVE_GATE
+    decision_ready = native and evidence_complete
+    if not decision_ready:
+        decision = Decision.INCONCLUSIVE
+    elif contract_passed:
+        decision = Decision.GO
+    else:
+        decision = Decision.NO_GO
     return DecisionSummary(
         environment_tier=environment_tier,
         gates=tuple(evaluations),
-        all_observed_gates_pass=all_pass,
-        decision_ready=all_pass and native,
+        evidence_complete=evidence_complete,
+        contract_passed=contract_passed,
+        decision_ready=decision_ready,
+        decision=decision,
     )
 
 
@@ -163,7 +213,9 @@ def summary_payload(summary: DecisionSummary) -> dict[str, object]:
 
     return {
         "environment_tier": summary.environment_tier.value,
-        "all_observed_gates_pass": summary.all_observed_gates_pass,
+        "evidence_complete": summary.evidence_complete,
+        "contract_passed": summary.contract_passed,
         "decision_ready": summary.decision_ready,
+        "decision": summary.decision.value,
         "gates": [asdict(gate) for gate in summary.gates],
     }

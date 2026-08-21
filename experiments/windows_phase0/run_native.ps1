@@ -9,7 +9,7 @@ $repositoryRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 
 Push-Location $repositoryRoot
 try {
-    uv run --python 3.12 --with pywinpty==3.0.5 -- `
+    uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
         python -m experiments.windows_phase0.runner `
         --environment-tier native-gate `
         --pwsh $PowerShellPath `

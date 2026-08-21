@@ -78,7 +78,7 @@ Run the exact commit above on Windows 11 x64 with Python 3.12 and PowerShell
 7.6.x:
 
 ```powershell
-uv run --python 3.12 --with pywinpty==3.0.5 -- `
+uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
   python -m experiments.windows_phase0.runner `
   --environment-tier native-gate `
   --repetitions 20 `

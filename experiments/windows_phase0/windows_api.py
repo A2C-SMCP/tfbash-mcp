@@ -24,6 +24,7 @@ STILL_ACTIVE: Final = 259
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: Final = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: Final = 9
 ERROR_NO_MORE_FILES: Final = 18
+ERROR_INVALID_PARAMETER: Final = 87
 
 
 class FILETIME(ctypes.Structure):
@@ -196,6 +197,14 @@ def _filetime_value(value: FILETIME) -> int:
     return (value.dwHighDateTime << 32) | value.dwLowDateTime
 
 
+def is_missing_process_error(exc: OSError) -> bool:
+    """Return whether OpenProcess proved that the PID no longer exists."""
+
+    return getattr(exc, "winerror", None) == ERROR_INVALID_PARAMETER or (
+        exc.errno == ERROR_INVALID_PARAMETER
+    )
+
+
 def _identity_from_handle(process: OwnedHandle, pid: int) -> ProcessIdentity:
     created = FILETIME()
     exited = FILETIME()
@@ -229,8 +238,10 @@ def _open_matching_process(identity: ProcessIdentity, access: int) -> OwnedHandl
             identity.pid,
             access | PROCESS_QUERY_LIMITED_INFORMATION,
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        if is_missing_process_error(exc):
+            return None
+        raise
     try:
         current = _identity_from_handle(process, identity.pid)
         if current != identity or _exit_code_from_handle(process, identity.pid) != STILL_ACTIVE:
@@ -238,7 +249,7 @@ def _open_matching_process(identity: ProcessIdentity, access: int) -> OwnedHandl
             return None
     except OSError:
         process.close()
-        return None
+        raise
     return process
 
 
@@ -316,8 +327,10 @@ def descendant_identities(root: ProcessIdentity) -> tuple[ProcessIdentity, ...]:
         parent, pid = pending.pop()
         try:
             child = process_identity(pid)
-        except OSError:
-            continue
+        except OSError as exc:
+            if is_missing_process_error(exc):
+                continue
+            raise
         # Toolhelp exposes only PPIDs. A stale PPID can equal a newly reused PID,
         # but a genuine child cannot have been created before its parent.
         if child.creation_time_100ns <= parent.creation_time_100ns:
