@@ -188,8 +188,10 @@ class ConPtySession:
                 self._condition.wait(remaining)
             return True
 
-    def write(self, value: str) -> int:
+    def write(self, value: str, *, on_enter: Callable[[], None] | None = None) -> int:
         pty = self._require_pty()
+        if on_enter is not None:
+            on_enter()
         return int(pty.write(value))
 
     def start_script(self, script: str) -> CommandTicket:

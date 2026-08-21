@@ -25,10 +25,9 @@ import traceback
 import uuid
 from collections.abc import Callable, Iterable
 from contextlib import suppress
+from importlib.metadata import version as package_version
 from pathlib import Path
 from time import monotonic
-
-import winpty
 
 from experiments.windows_phase0.conpty_session import ConPtySession, powershell_literal
 from experiments.windows_phase0.contracts import (
@@ -196,14 +195,24 @@ class TreeReporter:
 
 
 def _safe_kill_session(session: ConPtySession) -> None:
+    """Force cleanup for a failed gate; unknown or incomplete cleanup is fatal."""
+
+    identity: ProcessIdentity | None = None
     try:
         identity = process_identity(session.pid)
-    except (OSError, RuntimeError):
-        return
-    with suppress(OSError):
-        taskkill_tree(identity, force=True, timeout_seconds=5.0)
-    with suppress(Exception):
-        session.cancel_reader()
+    except OSError as exc:
+        if not is_missing_process_error(exc):
+            raise
+    except RuntimeError:
+        pass
+    try:
+        if identity is not None:
+            cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
+            if not bool(cleanup["all_exited"]):
+                raise RuntimeError(f"emergency session cleanup was incomplete: {cleanup}")
+    finally:
+        with suppress(Exception):
+            session.cancel_reader()
 
 
 def _close_session_verified(session: ConPtySession) -> None:
@@ -411,11 +420,14 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
     write_done = threading.Event()
     control_result: dict[str, object] = {}
     control_done = threading.Event()
+    payload = "x" * BACKPRESSURE_BYTES
 
     def write_payload() -> None:
-        writer_started.set()
         try:
-            write_result["accepted_characters"] = session.write("x" * BACKPRESSURE_BYTES)
+            write_result["accepted_characters"] = session.write(
+                payload,
+                on_enter=writer_started.set,
+            )
         except Exception as exc:
             write_result["write_error"] = repr(exc)
         finally:
@@ -755,6 +767,8 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
 
 def _attempt_eof(pwsh: str, control: str) -> tuple[bool, dict[str, object]]:
     session = ConPtySession(pwsh)
+    passed = False
+    details: dict[str, object]
     try:
         session.start()
         ready = f"READY_{uuid.uuid4().hex}"
@@ -772,7 +786,7 @@ def _attempt_eof(pwsh: str, control: str) -> tuple[bool, dict[str, object]]:
         probe = f"PROBE_{uuid.uuid4().hex}"
         post = session.run_script(f"[Console]::Out.WriteLine({powershell_literal(probe)})")
         passed = done + "0" in result.output and probe in post.output
-        return passed, {
+        details = {
             "control_hex": control.encode("utf-8").hex(),
             "stdin_bytes": 0 if done + "0" in result.output else None,
             "shell_probe_seen": probe in post.output,
@@ -780,12 +794,13 @@ def _attempt_eof(pwsh: str, control: str) -> tuple[bool, dict[str, object]]:
     except Exception as exc:
         with suppress(Exception):
             session.interrupt()
-        return False, {"control_hex": control.encode("utf-8").hex(), **_exception_details(exc)}
-    finally:
-        try:
-            session.close()
-        except Exception:
-            _safe_kill_session(session)
+        details = {"control_hex": control.encode("utf-8").hex(), **_exception_details(exc)}
+    try:
+        _close_session_verified(session)
+    except Exception as close_error:
+        passed = False
+        details["close_failure"] = _exception_details(close_error)
+    return passed, details
 
 
 def run_eof_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
@@ -1133,7 +1148,7 @@ def collect_environment(pwsh: str, tier: EnvironmentTier, runner_commit: str) ->
         raise RuntimeError("PowerShell environment probe did not return an object")
     python_version = platform.python_version()
     python_architecture = platform.machine()
-    pywinpty_version = winpty.__version__
+    pywinpty_version = package_version("pywinpty")
     uv_version = _command_version("uv")
     environment = {
         "environment_tier": tier.value,

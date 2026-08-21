@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from experiments.windows_phase0 import windows_api
+from experiments.windows_phase0 import runner, windows_api
 from experiments.windows_phase0.conpty_session import (
     CommandTicket,
     ConPtySession,
@@ -194,6 +195,18 @@ def test_close_rejects_a_live_process_even_after_reader_stopped() -> None:
         session.close()
 
 
+def test_write_entry_probe_runs_immediately_before_transport_write() -> None:
+    session = ConPtySession("pwsh")
+    fake = _FakePty()
+    session._pty = fake  # type: ignore[assignment]
+    entered: list[bool] = []
+
+    session.write("payload", on_enter=lambda: entered.append(not fake.writes))
+
+    assert entered == [True]
+    assert fake.writes == ["payload"]
+
+
 def test_open_matching_process_treats_only_missing_pid_as_dead(monkeypatch) -> None:
     identity = windows_api.ProcessIdentity(123, 456)
 
@@ -336,3 +349,48 @@ def test_toolchain_contract_rejects_unpinned_or_non_x64_versions(
     }
     with pytest.raises(RuntimeError):
         validate_toolchain(**values)
+
+
+class _SuccessfulEofSession:
+    def start(self) -> None:
+        pass
+
+    def start_script(self, _script: str) -> SimpleNamespace:
+        return SimpleNamespace(cursor=0)
+
+    def wait_for_text(self, _needle: str, _cursor: int, _timeout_seconds: float) -> str:
+        return "ready"
+
+    def write(self, _value: str) -> int:
+        return 1
+
+    def await_script(self, _ticket: SimpleNamespace, _timeout_seconds: float) -> SimpleNamespace:
+        return SimpleNamespace(output="EOF_b=0\r\n", exit_code=0)
+
+    def run_script(self, _script: str) -> SimpleNamespace:
+        return SimpleNamespace(output="PROBE_c\r\n", exit_code=0)
+
+
+def test_eof_gate_cannot_pass_when_verified_session_close_fails(monkeypatch) -> None:
+    session = _SuccessfulEofSession()
+    values = iter(("a", "b", "c"))
+    close_attempts: list[object] = []
+
+    monkeypatch.setattr(runner, "ConPtySession", lambda _pwsh: session)
+    monkeypatch.setattr(
+        runner.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=next(values)),
+    )
+
+    def close_failure(observed: object) -> None:
+        close_attempts.append(observed)
+        raise RuntimeError("forced cleanup required")
+
+    monkeypatch.setattr(runner, "_close_session_verified", close_failure)
+
+    passed, details = runner._attempt_eof("pwsh", "\x1a\r\n")
+
+    assert not passed
+    assert close_attempts == [session]
+    assert details["close_failure"]["exception"] == "forced cleanup required"
