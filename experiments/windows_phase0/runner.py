@@ -48,7 +48,6 @@ from experiments.windows_phase0.windows_api import (
     ProcessIdentity,
     descendant_identities,
     identity_is_alive,
-    is_missing_process_error,
     process_identity,
     taskkill_tree,
     wait_for_exit,
@@ -193,22 +192,38 @@ class TreeReporter:
         self.close()
 
 
+def _new_session(
+    pwsh: str,
+    *,
+    before_bootstrap: Callable[[int], ProcessIdentity] = process_identity,
+) -> ConPtySession:
+    """Create a session that captures its immutable shell identity at spawn."""
+
+    return ConPtySession(pwsh, before_bootstrap=before_bootstrap)
+
+
 def _safe_kill_session(session: ConPtySession) -> None:
     """Force cleanup for a failed gate; unknown or incomplete cleanup is fatal."""
 
-    identity: ProcessIdentity | None = None
+    root = session.spawn_identity
+    known = session.tracked_identities
     try:
-        identity = process_identity(session.pid)
-    except OSError as exc:
-        if not is_missing_process_error(exc):
-            raise
-    except RuntimeError:
-        pass
-    try:
-        if identity is not None:
-            cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
+        if root is None:
+            if session.spawn_cleanup_verified:
+                return
+            raise RuntimeError("session has no captured spawn identity")
+        if identity_is_alive(root):
+            cleanup = taskkill_tree(root, force=True, timeout_seconds=5.0)
             if not bool(cleanup["all_exited"]):
                 raise RuntimeError(f"emergency session cleanup was incomplete: {cleanup}")
+        for identity in known:
+            if identity_is_alive(identity):
+                cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
+                if not bool(cleanup["all_exited"]):
+                    raise RuntimeError(f"emergency descendant cleanup was incomplete: {cleanup}")
+        survivors = [identity.pid for identity in (root, *known) if identity_is_alive(identity)]
+        if survivors:
+            raise RuntimeError(f"emergency cleanup left survivors: {survivors}")
     finally:
         with suppress(Exception):
             session.cancel_reader()
@@ -217,42 +232,61 @@ def _safe_kill_session(session: ConPtySession) -> None:
 def _close_session_verified(session: ConPtySession) -> None:
     """Close a session and fail the gate if identity-fenced forced cleanup was needed."""
 
-    try:
-        identity = process_identity(session.pid)
-    except OSError as exc:
-        if not is_missing_process_error(exc):
-            raise
-        identity = None
-    except RuntimeError:
-        identity = None
+    identity = session.spawn_identity
+    known = session.tracked_identities
+    if identity is None:
+        if session.spawn_cleanup_verified:
+            return
+        _safe_kill_session(session)
+        raise RuntimeError("session has no captured spawn identity")
 
     try:
-        session.close(
-            process_exited=(
-                (lambda: True) if identity is None else (lambda: not identity_is_alive(identity))
-            )
-        )
+        session.close(process_exited=lambda: not identity_is_alive(identity))
     except Exception as close_error:
-        cleanup: dict[str, object] | None = None
-        if identity is not None:
-            cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
-            if not bool(cleanup["all_exited"]):
-                raise RuntimeError(
-                    f"session close failed and forced cleanup was incomplete: {cleanup}"
-                ) from close_error
-        raise RuntimeError(
-            f"session close failed and required forced cleanup: {cleanup}"
-        ) from close_error
+        _safe_kill_session(session)
+        raise RuntimeError("session close failed and required forced cleanup") from close_error
 
-    if identity is not None and identity_is_alive(identity):
+    if identity_is_alive(identity):
         cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
+        _safe_kill_session(session)
         raise RuntimeError(f"session remained alive after close: {cleanup}")
+    survivors = [item.pid for item in known if identity_is_alive(item)]
+    if survivors:
+        _safe_kill_session(session)
+        raise RuntimeError(f"session close left tracked descendants alive: {survivors}")
+
+
+def _session_identity(session: ConPtySession) -> ProcessIdentity:
+    """Return the creation-time identity captured before shell bootstrap."""
+
+    identity = session.spawn_identity
+    if identity is None:
+        raise RuntimeError("session has no captured spawn identity")
+    return identity
+
+
+def _wait_and_track_pid_marker(
+    session: ConPtySession,
+    marker: str,
+    cursor: int,
+    timeout_seconds: float = 5.0,
+) -> ProcessIdentity:
+    """Wait for, capture, and register a complete live fixture PID marker."""
+
+    pattern = re.compile(re.escape(marker) + r"(\d+)\r?\n")
+    output = session.wait_for_pattern(pattern, cursor, timeout_seconds)
+    match = pattern.search(output)
+    if match is None:
+        raise RuntimeError(f"complete fixture PID marker was missing: {marker}")
+    identity = process_identity(int(match.group(1)))
+    session.track_identity(identity)
+    return identity
 
 
 def _with_session(
     operation: Callable[[ConPtySession], dict[str, object]], pwsh: str
 ) -> dict[str, object]:
-    session = ConPtySession(pwsh)
+    session = _new_session(pwsh)
     try:
         session.start()
         return operation(session)
@@ -344,22 +378,22 @@ def _exit_code_scenario(session: ConPtySession) -> dict[str, object]:
 
 
 def _text_stdin_scenario(session: ConPtySession) -> dict[str, object]:
-    ready = f"READY_{uuid.uuid4().hex}"
+    ready = f"READY_{uuid.uuid4().hex}="
     done = f"TEXT_{uuid.uuid4().hex}="
     expected = "输入😀"
     source = (
-        "import base64,sys\n"
-        f"print({ready!r}, flush=True)\n"
+        "import base64,os,sys\n"
+        f"print({ready!r}+str(os.getpid()), flush=True)\n"
         "data=sys.stdin.buffer.readline()\n"
         f"print({done!r}+base64.b64encode(data).decode('ascii'), flush=True)"
     )
     ticket = session.start_script(_python_command(source))
-    session.wait_for_text(ready, ticket.cursor, 5.0)
+    child_identity = _wait_and_track_pid_marker(session, ready, ticket.cursor)
     session.write(expected + "\r\n")
     result = session.await_script(ticket, 5.0)
     encoded = base64.b64encode((expected + "\r\n").encode()).decode()
     observed = _normalized_output(result.output)
-    expected_output = f"{ready}\n{expected}\n{done}{encoded}\n"
+    expected_output = f"{ready}{child_identity.pid}\n{expected}\n{done}{encoded}\n"
     return {
         "passed": result.exit_code == 0 and observed == expected_output,
         "expected_base64": encoded,
@@ -369,21 +403,21 @@ def _text_stdin_scenario(session: ConPtySession) -> dict[str, object]:
 
 
 def _raw_nul_scenario(session: ConPtySession) -> dict[str, object]:
-    ready = f"READY_{uuid.uuid4().hex}"
+    ready = f"READY_{uuid.uuid4().hex}="
     done = f"RAW_{uuid.uuid4().hex}="
     source = (
-        "import base64,sys\n"
-        f"print({ready!r}, flush=True)\n"
+        "import base64,os,sys\n"
+        f"print({ready!r}+str(os.getpid()), flush=True)\n"
         "data=sys.stdin.buffer.readline()\n"
         f"print({done!r}+base64.b64encode(data).decode('ascii'), flush=True)"
     )
     ticket = session.start_script(_python_command(source))
-    session.wait_for_text(ready, ticket.cursor, 5.0)
+    child_identity = _wait_and_track_pid_marker(session, ready, ticket.cursor)
     session.write("\x00\r\n")
     result = session.await_script(ticket, 5.0)
     expected = base64.b64encode(b"\x00\r\n").decode()
     observed = _normalized_output(result.output)
-    expected_output = f"{ready}\n^@\n{done}{expected}\n"
+    expected_output = f"{ready}{child_identity.pid}\n^@\n{done}{expected}\n"
     return {
         "passed": result.exit_code == 0 and observed == expected_output,
         "expected_base64": expected,
@@ -394,10 +428,14 @@ def _raw_nul_scenario(session: ConPtySession) -> dict[str, object]:
 
 
 def _long_command_yield_scenario(session: ConPtySession) -> dict[str, object]:
-    ready = f"READY_{uuid.uuid4().hex}"
-    source = f"import threading\nprint({ready!r}, flush=True)\nthreading.Event().wait(60)"
+    ready = f"READY_{uuid.uuid4().hex}="
+    source = (
+        "import os,threading\n"
+        f"print({ready!r}+str(os.getpid()), flush=True)\n"
+        "threading.Event().wait(60)"
+    )
     ticket = session.start_script(_python_command(source))
-    session.wait_for_text(ready, ticket.cursor, 5.0)
+    _wait_and_track_pid_marker(session, ready, ticket.cursor)
     yielded_running = False
     try:
         session.await_script(ticket, 0.1)
@@ -413,11 +451,15 @@ def _long_command_yield_scenario(session: ConPtySession) -> dict[str, object]:
 
 
 def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
-    ready = f"READY_{uuid.uuid4().hex}"
-    source = f"import threading\nprint({ready!r}, flush=True)\nthreading.Event().wait(60)"
+    ready = f"READY_{uuid.uuid4().hex}="
+    source = (
+        "import os,threading\n"
+        f"print({ready!r}+str(os.getpid()), flush=True)\n"
+        "threading.Event().wait(60)"
+    )
     ticket = session.start_script(_python_command(source))
-    session.wait_for_text(ready, ticket.cursor, 5.0)
-    shell_identity = process_identity(session.pid)
+    _wait_and_track_pid_marker(session, ready, ticket.cursor)
+    shell_identity = _session_identity(session)
     write_result: dict[str, object] = {}
     writer_started = threading.Event()
     write_done = threading.Event()
@@ -520,7 +562,7 @@ def _late_fixture_command(event_name: str, before_wait_token: str, after_wait_to
 
 
 def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
-    session = ConPtySession(pwsh)
+    session = _new_session(pwsh)
     late_identity: ProcessIdentity | None = None
     with (
         TreeReporter() as late_ack_reporter,
@@ -563,6 +605,7 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
             if ready_ack.get("status") != "ready" or ready_ack.get("token") != late_token:
                 raise RuntimeError(f"invalid late-output ready acknowledgement: {ready_ack}")
             late_identity = process_identity(int(ready_ack["pid"]))
+            session.track_identity(late_identity)
 
             with ProcessExitMonitor(late_identity) as exit_monitor:
                 next_ticket = session.start_script(
@@ -647,7 +690,7 @@ def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int)
     for iteration in range(1, repetitions + 1):
         started = monotonic()
         tail = f"TAIL_{iteration}_{uuid.uuid4().hex}"
-        session = ConPtySession(pwsh)
+        session = _new_session(pwsh)
         session_closed = False
         try:
             session.start()
@@ -698,16 +741,20 @@ def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int)
 def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
     for iteration in range(1, repetitions + 1):
         started = monotonic()
-        session = ConPtySession(pwsh)
+        session = _new_session(pwsh)
         rebuilt: ConPtySession | None = None
         session_closed = False
         try:
             session.start()
-            ready = f"READY_{uuid.uuid4().hex}"
-            source = f"import threading\nprint({ready!r}, flush=True)\nthreading.Event().wait(60)"
+            ready = f"READY_{uuid.uuid4().hex}="
+            source = (
+                "import os,threading\n"
+                f"print({ready!r}+str(os.getpid()), flush=True)\n"
+                "threading.Event().wait(60)"
+            )
             ticket = session.start_script(_python_command(source))
-            session.wait_for_text(ready, ticket.cursor, 5.0)
-            shell_identity = process_identity(session.pid)
+            _wait_and_track_pid_marker(session, ready, ticket.cursor)
+            shell_identity = _session_identity(session)
             control_started = monotonic()
             accepted = session.interrupt()
             prompt_recovered = False
@@ -740,7 +787,7 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
                     session.cancel_reader()
                 remaining = CONTROL_DEADLINE_SECONDS - (monotonic() - control_started)
                 if remaining > 0 and bool(cleanup["all_exited"]):
-                    rebuilt = ConPtySession(pwsh)
+                    rebuilt = _new_session(pwsh)
                     rebuilt.start(timeout_seconds=remaining)
                     remaining = CONTROL_DEADLINE_SECONDS - (monotonic() - control_started)
                     if remaining > 0:
@@ -782,21 +829,21 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
 
 
 def _attempt_eof(pwsh: str, control: str) -> tuple[bool, dict[str, object]]:
-    session = ConPtySession(pwsh)
+    session = _new_session(pwsh)
     passed = False
     details: dict[str, object]
     try:
         session.start()
-        ready = f"READY_{uuid.uuid4().hex}"
+        ready = f"READY_{uuid.uuid4().hex}="
         done = f"EOF_{uuid.uuid4().hex}="
         source = (
-            "import sys\n"
-            f"print({ready!r}, flush=True)\n"
+            "import os,sys\n"
+            f"print({ready!r}+str(os.getpid()), flush=True)\n"
             "data=sys.stdin.buffer.read()\n"
             f"print({done!r}+str(len(data)), flush=True)"
         )
         ticket = session.start_script(_python_command(source))
-        session.wait_for_text(ready, ticket.cursor, 5.0)
+        _wait_and_track_pid_marker(session, ready, ticket.cursor)
         session.write(control)
         result = session.await_script(ticket, CONTROL_DEADLINE_SECONDS)
         probe = f"PROBE_{uuid.uuid4().hex}"
@@ -858,7 +905,7 @@ def run_eof_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
 def run_timeout_rebuild_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
     for iteration in range(1, repetitions + 1):
         started = monotonic()
-        session = ConPtySession(pwsh)
+        session = _new_session(pwsh)
         session_closed = False
         try:
             session.start()
@@ -870,24 +917,20 @@ def run_timeout_rebuild_gate(log: ExperimentLog, pwsh: str, repetitions: int) ->
                 "threading.Event().wait(60)"
             )
             ticket = session.start_script(_python_command(source))
-            output = session.wait_for_text(ready, ticket.cursor, 5.0)
-            match = re.search(re.escape(ready) + r"(\d+)", output)
-            if match is None:
-                raise RuntimeError("timeout fixture PID marker was missing")
-            child_identity = process_identity(int(match.group(1)))
+            child_identity = _wait_and_track_pid_marker(session, ready, ticket.cursor)
             session.interrupt()
             soft_recovered = True
             try:
                 session.await_script(ticket, 0.5)
             except TimeoutError:
                 soft_recovered = False
-            shell_identity = process_identity(session.pid)
+            shell_identity = _session_identity(session)
             cleanup = taskkill_tree(shell_identity, force=True, timeout_seconds=5.0)
             session.cancel_reader()
             _close_session_verified(session)
             session_closed = True
 
-            rebuilt = ConPtySession(pwsh)
+            rebuilt = _new_session(pwsh)
             try:
                 rebuilt.start()
                 token = f"REBUILT_{uuid.uuid4().hex}"
@@ -960,7 +1003,7 @@ def _rebuild_probe(pwsh: str, deadline: float) -> bool:
     remaining = deadline - monotonic()
     if remaining <= 0:
         return False
-    rebuilt = ConPtySession(pwsh)
+    rebuilt = _new_session(pwsh)
     try:
         rebuilt.start(timeout_seconds=remaining)
         remaining = deadline - monotonic()
@@ -977,7 +1020,7 @@ def _rebuild_probe(pwsh: str, deadline: float) -> bool:
 
 
 def _run_toolhelp_tree_once(pwsh: str, action: str) -> dict[str, object]:
-    session = ConPtySession(pwsh)
+    session = _new_session(pwsh)
     session_closed = False
     with (
         TreeReporter() as reporter,
@@ -985,10 +1028,12 @@ def _run_toolhelp_tree_once(pwsh: str, action: str) -> dict[str, object]:
     ):
         try:
             session.start()
-            shell_identity = process_identity(session.pid)
+            shell_identity = _session_identity(session)
             session.start_script(_tree_command(reporter, release.name))
             reports = reporter.collect(3, 10.0)
             identities, hierarchy = _reported_identities(reports)
+            for identity in identities.values():
+                session.track_identity(identity)
             discovered = descendant_identities(shell_identity)
             reported_descendants = {identity.pid for identity in identities.values()}
             toolhelp_pids = {identity.pid for identity in discovered}
@@ -1047,10 +1092,7 @@ def _run_toolhelp_tree_once(pwsh: str, action: str) -> dict[str, object]:
         finally:
             release.set()
             if not session_closed:
-                try:
-                    session.close()
-                except Exception:
-                    _safe_kill_session(session)
+                _safe_kill_session(session)
 
 
 def _run_job_tree_once(pwsh: str, action: str) -> dict[str, object]:
@@ -1062,16 +1104,19 @@ def _run_job_tree_once(pwsh: str, action: str) -> dict[str, object]:
     ):
         assigned: dict[str, ProcessIdentity] = {}
 
-        def assign(pid: int) -> None:
+        def assign(pid: int) -> ProcessIdentity:
             assigned["shell"] = job.assign_pid(pid)
+            return assigned["shell"]
 
-        session = ConPtySession(pwsh, before_bootstrap=assign)
+        session = _new_session(pwsh, before_bootstrap=assign)
         session_closed = False
         try:
             session.start()
             session.start_script(_tree_command(reporter, release.name))
             reports = reporter.collect(3, 10.0)
             identities, hierarchy = _reported_identities(reports)
+            for identity in identities.values():
+                session.track_identity(identity)
             all_identities = (assigned["shell"], *identities.values())
 
             control_started = monotonic()
@@ -1111,10 +1156,7 @@ def _run_job_tree_once(pwsh: str, action: str) -> dict[str, object]:
         finally:
             release.set()
             if not session_closed:
-                try:
-                    session.close()
-                except Exception:
-                    _safe_kill_session(session)
+                _safe_kill_session(session)
 
 
 def run_tree_gates(log: ExperimentLog, pwsh: str, repetitions: int) -> None:

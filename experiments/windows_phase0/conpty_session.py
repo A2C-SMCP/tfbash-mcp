@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import threading
 import uuid
 from collections.abc import Callable
@@ -10,6 +11,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
 from typing import Protocol
+
+from experiments.windows_phase0.windows_api import ProcessIdentity
 
 
 class PtyLike(Protocol):
@@ -92,7 +95,12 @@ def parse_command_output(raw_output: str, ticket: CommandTicket) -> tuple[str, i
 class ConPtySession:
     """A persistent PowerShell process with exactly one PTY reader."""
 
-    def __init__(self, pwsh: str, *, before_bootstrap: Callable[[int], None] | None = None) -> None:
+    def __init__(
+        self,
+        pwsh: str,
+        *,
+        before_bootstrap: Callable[[int], ProcessIdentity] | None = None,
+    ) -> None:
         self._pwsh = pwsh
         self._before_bootstrap = before_bootstrap
         self._condition = threading.Condition()
@@ -103,6 +111,9 @@ class ConPtySession:
         self._reader: threading.Thread | None = None
         self._prompt_marker = f"__TF_PROMPT_{uuid.uuid4().hex}__"
         self._terminal_query_tail = ""
+        self._spawn_identity: ProcessIdentity | None = None
+        self._tracked_identities: list[ProcessIdentity] = []
+        self._spawn_cleanup_verified = False
 
     @property
     def pid(self) -> int:
@@ -116,6 +127,24 @@ class ConPtySession:
     def prompt_marker(self) -> str:
         return self._prompt_marker
 
+    @property
+    def spawn_identity(self) -> ProcessIdentity | None:
+        return self._spawn_identity
+
+    @property
+    def tracked_identities(self) -> tuple[ProcessIdentity, ...]:
+        return tuple(self._tracked_identities)
+
+    @property
+    def spawn_cleanup_verified(self) -> bool:
+        return self._spawn_cleanup_verified
+
+    def track_identity(self, identity: ProcessIdentity) -> None:
+        if not isinstance(identity, ProcessIdentity):
+            raise TypeError("tracked identity must be a ProcessIdentity")
+        if identity != self._spawn_identity and identity not in self._tracked_identities:
+            self._tracked_identities.append(identity)
+
     def start(self, timeout_seconds: float = 15.0) -> None:
         """Spawn, establish ownership, start the reader, and bootstrap UTF-8/prompt state."""
 
@@ -126,15 +155,25 @@ class ConPtySession:
         if not pty.spawn(self._pwsh, cmdline=args):
             raise RuntimeError("pywinpty returned false while spawning PowerShell")
         self._pty = pty
-        if self._before_bootstrap is not None:
-            self._before_bootstrap(self.pid)
+        try:
+            if self._before_bootstrap is not None:
+                identity = self._before_bootstrap(self.pid)
+                if not isinstance(identity, ProcessIdentity):
+                    raise RuntimeError("spawn callback did not return a ProcessIdentity")
+                self._spawn_identity = identity
+        except Exception as callback_error:
+            try:
+                self._start_reader()
+                self.close(timeout_seconds=min(timeout_seconds, 5.0))
+                self._spawn_cleanup_verified = True
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "spawn callback failed and PTY-owned cleanup could not verify exit: "
+                    f"{cleanup_error!r}"
+                ) from callback_error
+            raise
 
-        self._reader = threading.Thread(
-            target=self._reader_main,
-            name=f"phase0-conpty-reader-{self.pid}",
-            daemon=True,
-        )
-        self._reader.start()
+        self._start_reader()
 
         ready_marker = f"__TF_READY_{uuid.uuid4().hex}__"
         bootstrap = "\n".join(
@@ -151,6 +190,16 @@ class ConPtySession:
         self.write(_encoded_script_invocation(bootstrap))
         self.wait_for_text(ready_marker, cursor, timeout_seconds)
         self.wait_for_text(self._prompt_marker, cursor, timeout_seconds)
+
+    def _start_reader(self) -> None:
+        if self._reader is not None:
+            return
+        self._reader = threading.Thread(
+            target=self._reader_main,
+            name=f"phase0-conpty-reader-{self.pid}",
+            daemon=True,
+        )
+        self._reader.start()
 
     def checkpoint(self) -> int:
         with self._condition:
@@ -175,6 +224,29 @@ class ConPtySession:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"timed out waiting for ConPTY marker: {needle}")
+                self._condition.wait(remaining)
+            return self._output[cursor:]
+
+    def wait_for_pattern(
+        self,
+        pattern: re.Pattern[str],
+        cursor: int,
+        timeout_seconds: float,
+    ) -> str:
+        """Wait until a complete regex match exists across arbitrary PTY chunks."""
+
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        deadline = monotonic() + timeout_seconds
+        with self._condition:
+            while pattern.search(self._output[cursor:]) is None:
+                if self._reader_error is not None:
+                    raise RuntimeError(f"ConPTY reader failed: {self._reader_error}")
+                if self._reader_done:
+                    raise EOFError(f"ConPTY closed before pattern arrived: {pattern.pattern}")
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"timed out waiting for ConPTY pattern: {pattern.pattern}")
                 self._condition.wait(remaining)
             return self._output[cursor:]
 

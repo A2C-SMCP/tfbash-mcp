@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
+import threading
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -386,7 +390,12 @@ def test_eof_gate_cannot_pass_when_verified_session_close_fails(monkeypatch) -> 
     values = iter(("a", "b", "c"))
     close_attempts: list[object] = []
 
-    monkeypatch.setattr(runner, "ConPtySession", lambda _pwsh: session)
+    monkeypatch.setattr(runner, "_new_session", lambda _pwsh: session)
+    monkeypatch.setattr(
+        runner,
+        "_wait_and_track_pid_marker",
+        lambda _session, _marker, _cursor: windows_api.ProcessIdentity(123, 456),
+    )
     monkeypatch.setattr(
         runner.uuid,
         "uuid4",
@@ -404,3 +413,188 @@ def test_eof_gate_cannot_pass_when_verified_session_close_fails(monkeypatch) -> 
     assert not passed
     assert close_attempts == [session]
     assert details["close_failure"]["exception"] == "forced cleanup required"
+
+
+class _IdentitySession:
+    def __init__(
+        self,
+        root: windows_api.ProcessIdentity | None,
+        tracked: tuple[windows_api.ProcessIdentity, ...] = (),
+    ) -> None:
+        self.spawn_identity = root
+        self.tracked_identities = tracked
+        self.spawn_cleanup_verified = False
+        self.cancelled = False
+        self.close_checks: list[bool] = []
+
+    def close(self, *, process_exited: Callable[[], bool]) -> None:
+        self.close_checks.append(process_exited())
+
+    def cancel_reader(self) -> None:
+        self.cancelled = True
+
+
+def test_verified_close_uses_spawn_identity_without_recapturing_reused_pid(
+    monkeypatch,
+) -> None:
+    original = windows_api.ProcessIdentity(123, 1000)
+    session = _IdentitySession(original)
+
+    def unexpected_recapture(_pid: int) -> windows_api.ProcessIdentity:
+        raise AssertionError("cleanup must not recapture a reused PID")
+
+    monkeypatch.setattr(runner, "process_identity", unexpected_recapture)
+    monkeypatch.setattr(runner, "identity_is_alive", lambda identity: False)
+
+    runner._close_session_verified(session)  # type: ignore[arg-type]
+
+    assert session.close_checks == [True]
+
+
+def test_emergency_cleanup_kills_tracked_descendant_after_root_exits(monkeypatch) -> None:
+    root = windows_api.ProcessIdentity(123, 1000)
+    descendant = windows_api.ProcessIdentity(456, 2000)
+    session = _IdentitySession(root, (descendant,))
+    alive = {root: False, descendant: True}
+    killed: list[windows_api.ProcessIdentity] = []
+
+    def taskkill(identity, *, force: bool, timeout_seconds: float):
+        assert force
+        assert timeout_seconds == 5.0
+        killed.append(identity)
+        alive[identity] = False
+        return {"all_exited": True}
+
+    monkeypatch.setattr(runner, "identity_is_alive", alive.__getitem__)
+    monkeypatch.setattr(runner, "taskkill_tree", taskkill)
+
+    runner._safe_kill_session(session)  # type: ignore[arg-type]
+
+    assert killed == [descendant]
+    assert session.cancelled
+
+
+def test_cleanup_without_spawn_identity_fails_closed(monkeypatch) -> None:
+    session = _IdentitySession(None)
+
+    with pytest.raises(RuntimeError, match="no captured spawn identity"):
+        runner._close_session_verified(session)  # type: ignore[arg-type]
+
+    assert session.cancelled
+
+
+def test_identity_query_runtime_error_is_not_treated_as_process_exit(monkeypatch) -> None:
+    session = _IdentitySession(windows_api.ProcessIdentity(123, 1000))
+
+    def indeterminate(_identity: windows_api.ProcessIdentity) -> bool:
+        raise RuntimeError("creation-time query failed")
+
+    monkeypatch.setattr(runner, "identity_is_alive", indeterminate)
+
+    with pytest.raises(RuntimeError, match="creation-time query failed"):
+        runner._safe_kill_session(session)  # type: ignore[arg-type]
+
+    assert session.cancelled
+
+
+def test_wait_for_pattern_handles_every_pid_marker_chunk_boundary() -> None:
+    marker = "READY_token="
+    complete = marker + "1234\r\n"
+    pattern = re.compile(re.escape(marker) + r"(\d+)\r?\n")
+
+    def wait_for_complete_marker(
+        observed_session: ConPtySession,
+        observed_result: list[str],
+        observed_done: threading.Event,
+    ) -> None:
+        observed_result.append(observed_session.wait_for_pattern(pattern, 0, 1.0))
+        observed_done.set()
+
+    for split_at in range(1, len(complete)):
+        session = ConPtySession("pwsh")
+        session._output = complete[:split_at]
+        result: list[str] = []
+        done = threading.Event()
+
+        waiter = threading.Thread(
+            target=wait_for_complete_marker,
+            args=(session, result, done),
+            daemon=True,
+        )
+        waiter.start()
+        with session._condition:
+            session._output += complete[split_at:]
+            session._condition.notify_all()
+
+        assert done.wait(1.0)
+        waiter.join()
+        assert result == [complete]
+
+
+class _SpawnFailurePty(_FakePty):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pid = 123
+        self.spawned = False
+        self.alive = True
+        self.eof = False
+        self.exit_requested = threading.Event()
+
+    def spawn(self, _pwsh: str, *, cmdline: str) -> bool:
+        assert cmdline == "-NoLogo -NoProfile -NoExit"
+        self.spawned = True
+        return True
+
+    def write(self, value: str) -> int:
+        self.writes.append(value)
+        if value == "exit\r\n":
+            self.alive = False
+            self.eof = True
+            self.exit_requested.set()
+        return len(value)
+
+    def read(self, *, blocking: bool) -> str:
+        assert blocking
+        assert self.exit_requested.wait(1.0)
+        return ""
+
+    def isalive(self) -> bool:
+        return self.alive
+
+    def iseof(self) -> bool:
+        return self.eof
+
+    def cancel_io(self) -> None:
+        self.exit_requested.set()
+
+
+@pytest.mark.parametrize("side_effect_before_failure", (False, True))
+def test_spawn_callback_failure_uses_pty_owned_verified_cleanup(
+    monkeypatch,
+    side_effect_before_failure: bool,
+) -> None:
+    pty = _SpawnFailurePty()
+    callback_pids: list[int] = []
+    backend = SimpleNamespace(ConPTY=object())
+    monkeypatch.setitem(
+        sys.modules,
+        "winpty",
+        SimpleNamespace(PTY=lambda *_args, **_kwargs: pty, Backend=backend),
+    )
+
+    def callback(pid: int) -> windows_api.ProcessIdentity:
+        if side_effect_before_failure:
+            callback_pids.append(pid)
+        raise RuntimeError("identity or assignment failed")
+
+    session = ConPtySession("pwsh", before_bootstrap=callback)
+
+    with pytest.raises(RuntimeError, match="identity or assignment failed"):
+        session.start(timeout_seconds=1.0)
+
+    assert pty.spawned
+    assert pty.writes == ["exit\r\n"]
+    assert not pty.alive
+    assert session.spawn_cleanup_verified
+    assert session._pty is None
+    assert callback_pids == ([123] if side_effect_before_failure else [])
