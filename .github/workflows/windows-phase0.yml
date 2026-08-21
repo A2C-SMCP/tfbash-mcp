@@ -1,0 +1,65 @@
+name: Windows Phase 0
+
+on:
+  push:
+    branches: [feature/issue-1-v1-shell-runtime]
+    paths:
+      - ".github/workflows/windows-phase0.yml"
+      - "experiments/windows_phase0/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-smoke:
+    name: Hosted Windows smoke
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install pinned PowerShell
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "PowerShell-7.6.3-win-x64.zip"
+          $install = Join-Path $env:RUNNER_TEMP "PowerShell-7.6.3"
+          $uri = "https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/PowerShell-7.6.3-win-x64.zip"
+          $expected = "07DDB0D00B660459560EF82A9841DA7705B27CD5DCCA5A0D7B025A98ECA29ECA"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash
+          if ($actual -ne $expected) {
+            throw "PowerShell archive checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $install
+          "PHASE0_PWSH=$(Join-Path $install 'pwsh.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Test result contracts
+        run: uv run --with pytest -- pytest experiments/windows_phase0/test_contracts.py
+
+      - name: Run hosted smoke matrix
+        shell: pwsh
+        run: |
+          uv run --python 3.12 --with pywinpty==3.0.5 -- `
+            python experiments/windows_phase0/runner.py `
+            --environment-tier hosted-smoke `
+            --pwsh $env:PHASE0_PWSH `
+            --repetitions 20 `
+            --output-dir artifacts/windows-phase0-hosted
+
+      - name: Upload raw experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-phase0-hosted-${{ github.run_attempt }}
+          path: artifacts/windows-phase0-hosted
+          if-no-files-found: warn
+          retention-days: 30
