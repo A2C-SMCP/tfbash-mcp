@@ -139,18 +139,25 @@ standalone MCP Client 或 IDE Host
 
 ### 4.1 Host Profile、workspace 与 Agent 感知
 
-`HostProfile` 与 `RuntimeProfile` 正交。`standalone` 和 `ide` 不产生两套 Server，也不改变 Shell 执行语义：
+`HostProfile` 与 `RuntimeProfile` 正交。`standalone` 和 `ide` 不产生两套 Server，也不改变 Shell 执行语义。Server 启动时把宿主提供的参数解析为一份进程内不可变的 `HostConfig`；它至少包含 `host_profile`、`workspace_root`、`default_cwd`、`runtime_profile`、默认 Shell、默认 startup command 和可安全展示的 environment summary。原始环境变量只用于创建子进程，不属于 Agent 可见合同。
 
 | Host Profile | workspace 来源 | 宿主职责 | Server 不承担 |
 |---|---|---|---|
-| `standalone` | 显式 `--workspace-root`；省略时为 Server 启动 cwd | 用户或通用 MCP Client 配置、启动和停止 Server | 猜测编辑器、活动文件或选区 |
-| `ide` | IDE/SDK 启动时显式传入 workspace root | 一 workspace/Computer 一进程、生命周期、连接状态和诊断展示 | 连接 IDE API、读取标签页或把编辑器状态并入 Shell Domain |
+| `standalone` | 显式 `--workspace-root`；省略时为 Server 启动 cwd | 用户或通用 MCP Client 提供 workspace、默认 cwd、进程环境、可选 startup command，并启动/停止 Server | 猜测编辑器、活动文件、选区或项目虚拟环境 |
+| `ide` | IDE/SDK 启动时显式传入 workspace root | 一 workspace/Computer 一进程；解析所选解释器/项目环境，注入进程环境或方言专属 startup command；管理生命周期和诊断展示 | 连接 IDE API、扫描 `.venv`/Poetry/Conda、读取标签页或把编辑器状态并入 Shell Domain |
+
+宿主环境初始化遵守以下边界：
+
+- 标准 Python venv 由 IDE/launcher 解析，优先通过 `VIRTUAL_ENV` 与预置后的 `PATH`/`Path` 注入 Server 进程，使新 Shell 直接继承；Server 不自行查找 `.venv`，也不以执行 `Activate.ps1` 作为 Windows 默认路径；
+- Conda、direnv 或自定义工具若不能只靠环境变量表达，可由宿主提供与当前 Runtime Profile 方言一致的 `startup_command`；该命令在初次 open 和自动重建时都必须执行，失败则本次 `shell_open`/rebuild 失败；
+- `shell_open` 显式字段逐字段覆盖 `HostConfig`，`HostConfig` 再覆盖 Runtime Profile 默认值。环境按“Server 继承环境 → 宿主注入 → `shell_open.env`”逐层合并；Windows 按大小写不敏感的 key 语义处理；
+- environment summary 只能由宿主显式声明 `kind`（`none|python-venv|conda|custom`）和可选的非敏感 `name`。Server 不从环境变量反推类型，也不向 Agent 回显环境变量值、startup command 或解释器绝对路径。
 
 Agent 不得从 `tfbash-mcp` 名称、路径分隔符或 `TERM_PROGRAM` 猜测运行环境。Server 必须通过互相补强的稳定渠道提供 runtime context：
 
 1. MCP `server/discover.instructions`；兼容旧协议时使用等价的 initialization instructions；
 2. 根据进程固定 Runtime Profile 生成的工具 description，明确 command dialect、路径风格和默认工作目录；
-3. `shell_list` 顶层固定返回 `runtime` 与 `host` 元数据；`shell_open` 返回所属 `dialect`；
+3. `shell_list` 顶层固定返回 `runtime` 与 `host` 元数据；`host` 包含 mode、workspace 和脱敏 environment summary，`shell_open` 返回所属 `dialect`；
 4. 可选提供 `shell://runtime` resource 作为诊断补充，但不能把资源是否被 Client 注入模型上下文作为正确性的前提。
 
 MCP roots 在协议版本 `2026-07-28` 已 deprecated，V1 不新增对 roots 的依赖。workspace root 使用 Server configuration 显式传递；它是默认 cwd 和相关上下文，不因本项目的可信本机模型而自动成为 sandbox 边界。
@@ -221,8 +228,8 @@ V1 只暴露一个 Shell 资源模型，共七个工具：
 
 | 字段 | 类型 | 必填 | 默认值与约束 |
 |---|---|---|---|
-| `cwd` | string | 否 | Server `workspace_root`；必须是启动时存在且可进入的平台原生绝对目录 |
-| `env` | object<string,string> | 否 | `{}`；按共同规则覆盖继承环境 |
+| `cwd` | string | 否 | `HostConfig.default_cwd`；必须是启动时存在且可进入的平台原生绝对目录 |
+| `env` | object<string,string> | 否 | `{}`；按共同规则覆盖 HostConfig 已冻结的 Server/宿主环境 |
 | `shell` | string | 否 | Server `shell`；平台原生绝对路径，且必须兼容已选 Runtime Profile（Bash 或 PowerShell 7.6） |
 | `startup_command` | string 或 null | 否 | Server `startup_command`；显式 `null` 表示不运行启动命令，字符串不能为空且不超过 `max_command_bytes` |
 
@@ -246,7 +253,12 @@ V1 只暴露一个 Shell 资源模型，共七个工具：
     "default_cwd": "C:\\work\\project"
   },
   "host": {
-    "mode": "ide"
+    "mode": "ide",
+    "workspace_root": "C:\\work\\project",
+    "environment": {
+      "kind": "python-venv",
+      "name": ".venv"
+    }
   },
   "shells": [
     {
@@ -260,7 +272,7 @@ V1 只暴露一个 Shell 资源模型，共七个工具：
 }
 ```
 
-`shell_open` 成功结果固定包含 `shell_id`、`status="ready"`、最终 `cwd` 和 `dialect="bash|pwsh"`。`shell_list` 顶层固定包含 `runtime`、`host` 和 `shells`：`runtime` 至少给出 `platform`、`dialect`、`shell_version`、`default_cwd`，`host.mode` 为 `standalone|ide`。每个 Shell 项固定包含 `shell_id`、`status`、`last_known_cwd`、`active_exec_id` 和 `created_at_ms`；`last_known_cwd` 在尚未确认或故障时为 `null`，`active_exec_id` 仅在 `busy`/`rebuilding` 且仍有活动 Execution 时为字符串，其他状态固定为 `null`，字段不得省略。
+`shell_open` 成功结果固定包含 `shell_id`、`status="ready"`、最终 `cwd` 和 `dialect="bash|pwsh"`。`shell_list` 顶层固定包含 `runtime`、`host` 和 `shells`：`runtime` 至少给出 `platform`、`dialect`、`shell_version`、`default_cwd`；`host` 固定给出 `mode="standalone|ide"`、`workspace_root` 与 `environment`，其中 `environment.kind` 为 `none|python-venv|conda|custom`，`environment.name` 为宿主提供的可选非敏感显示名。不得返回原始 env、startup command、解释器绝对路径或任何 secret。每个 Shell 项固定包含 `shell_id`、`status`、`last_known_cwd`、`active_exec_id` 和 `created_at_ms`；`last_known_cwd` 在尚未确认或故障时为 `null`，`active_exec_id` 仅在 `busy`/`rebuilding` 且仍有活动 Execution 时为字符串，其他状态固定为 `null`，字段不得省略。
 
 `shell_close` 输入 `{"shell_id":"shell_01"}`。它先把 Shell 标记为 `closing`，终止活动 Execution 的受管前台执行树和仍在 Runtime Profile 所有权边界内的子孙，关闭 PTY 并从 Registry 移除。正常清理返回 `{"shell_id":"shell_01","status":"closed","cleanup_complete":true}`；若 `close_timeout_ms` 到期，Server 必须至少执行平台强制回收、关闭 PTY、移除 Registry 并返回相同结构但 `cleanup_complete=false`，异步 reaper 只做非阻塞收尾，不能重新暴露该 Shell。
 
@@ -874,6 +886,9 @@ Server 配置只描述自身运行环境：
 --runtime-profile auto|posix-bash|windows-pwsh
 --host-profile standalone|ide
 --workspace-root <path>
+--default-cwd <optional-path>
+--environment-kind none|python-venv|conda|custom
+--environment-name <optional-non-sensitive-label>
 --shell <optional-compatible-executable>
 --shell-startup-timeout-ms 30000
 --command-yield-ms 10000
@@ -896,11 +911,13 @@ Server 配置只描述自身运行环境：
 --startup-command <optional>
 ```
 
-`shell`、`workspace_root` 和 `startup_command` 是 `shell_open` 未传对应字段时使用的 Server 级默认配置，但 Server 启动时不隐式创建 Command Shell。`active_venv_cmd` 改名为通用的 `startup_command`；它可以激活 Python venv，也可以加载任意项目环境，不把协议绑定到 Python。
+Server 在启动时把上述参数、启动 cwd 和继承环境冻结为 `HostConfig`。`default_cwd` 省略时等于 `workspace_root`；`shell`、`default_cwd` 和 `startup_command` 是 `shell_open` 未传对应字段时使用的 Server 级默认配置，但 Server 启动时不隐式创建 Command Shell。优先级逐字段固定为 `shell_open` 显式值 > `HostConfig` > Runtime Profile 默认值；`shell_open.startup_command=null` 仍表示仅为该 Shell 禁用宿主默认 startup command。
 
-V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`--dialect` 或 `--pty-transport`，避免调用方拼出未经验证的组合。`auto` 在 Windows 选择 `WindowsPwshProfile`，在 macOS/Linux 选择 `PosixBashProfile`；显式值与当前 OS 不兼容时启动失败。`--host-profile` 只影响 workspace/config 来源与诊断元数据，不改变工具 schema 或 Shell 执行语义。
+`active_venv_cmd` 改名为通用的 `startup_command`；它可以加载 Conda、direnv 或其他需要 Shell 命令的项目环境，不把协议绑定到 Python。标准 Python venv 应由 standalone launcher 或 IDE 解析后，通过 MCP stdio descriptor/process environment 注入 `VIRTUAL_ENV` 并把 venv 的 `bin` 或 `Scripts` 目录预置到 `PATH`/`Path`；这部分环境随 Server 进程继承，不作为可能泄密的 CLI 参数，也不依赖 PowerShell execution policy。Server 不扫描项目寻找虚拟环境。
 
-`--workspace-root` 必须是平台原生绝对路径。`standalone` 省略时使用 Server 启动 cwd；`ide` 必须由宿主显式提供。V1 不通过 deprecated MCP roots、`TERM_PROGRAM`、VS Code/Cursor 环境变量或当前进程 cwd 的偶然变化推断 IDE workspace。
+V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`--dialect` 或 `--pty-transport`，避免调用方拼出未经验证的组合。`auto` 在 Windows 选择 `WindowsPwshProfile`，在 macOS/Linux 选择 `PosixBashProfile`；显式值与当前 OS 不兼容时启动失败。`--host-profile` 只影响 workspace/config 来源、环境初始化责任和诊断元数据，不改变七工具名称、请求 schema 或 Shell 执行语义。`HostConfig` 包裹进程选定的 Runtime Profile，但不进入 `ShellDialect`、`PtyTransport` 或 `ProcessSupervisor` ports。
+
+`--workspace-root` 与显式 `--default-cwd` 必须是启动时存在且可进入的平台原生绝对路径。`standalone` 省略 workspace 时使用 Server 启动 cwd；`ide` 必须由宿主显式提供 workspace。`environment-kind/name` 只是 Agent 可见的脱敏声明，不能驱动环境发现或执行；环境值和 startup command 永不回显。V1 不通过 deprecated MCP roots、`TERM_PROGRAM`、VS Code/Cursor 环境变量或当前进程 cwd 的偶然变化推断 IDE workspace。
 
 `shell_startup_timeout_ms` 是 open/rebuild 从 spawn 到 startup 完成的总 deadline；`recovery_grace_ms` 是 timeout 后 soft recovery 上限；`job_cleanup_timeout_ms` 覆盖平台受管子孙枚举、terminate/kill、reap/liveness verification 和 quiet barrier，`output_quiet_ms` 是其中要求的连续无输出窗口；`close_timeout_ms` 是 close 及全局 shutdown cleanup 的硬上限，必须大于 `shutdown_grace_ms`。这些配置都必须为正整数，Server 启动时拒绝不满足关系的配置。
 
@@ -916,7 +933,8 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 - 工具入参不含 Computer 标识。
 - 七个工具拒绝缺失必填字段、未知字段、非法 `null`、类型错误、范围越界和 oneOf 冲突；所有成功与错误响应符合 5.x 的字段表和矩阵。
 - standalone 与 IDE 启动相同 Server binary；在相同 Runtime Profile 和 workspace 下产生相同 Shell 行为。
-- Agent 在首次构造命令前可从 instructions/tool description 获知方言，并可从 `shell_list.runtime` 获取权威平台、方言和默认 cwd。
+- standalone/IDE 可通过不同 `HostConfig` 设置默认 cwd、继承环境和 startup command；IDE 提供标准 Python venv 时使用 `VIRTUAL_ENV` + `PATH`/`Path`，Server 不扫描环境或依赖 `Activate.ps1`。
+- Agent 在首次构造命令前可从 instructions/tool description 获知方言，并可从 `shell_list.runtime/host` 获取权威平台、方言、workspace、默认 cwd 和脱敏环境摘要；任何 env value、startup command、解释器绝对路径或 secret 均不可见。
 
 ### 10.2 多持久 Command Shell
 
@@ -972,7 +990,7 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 8. 增加 tfrobot-client + SDK 集成测试，验证开关、descriptor、启动状态和停止回收；
 9. 终端 UI 若后续接入，先单独评审 Terminal mode 的真实场景、raw byte 与 resize 合同，不建立平行 Registry；
 10. Shell Domain 测试使用 Runtime Port test double 验证平台无关状态机；另加依赖边界检查，禁止 `shell/domain` 导入 pexpect、pywinpty 或平台进程 API。承载真实 PTY、控制和进程树语义的测试必须在两个 V1 Runtime Profile 运行，不能以 test double 代替；
-11. standalone/IDE 组合测试验证同一 binary、显式 workspace 配置、runtime instructions、动态工具 description、`shell_list.runtime/host`，并验证 Server 不依赖 MCP roots 或编辑器环境变量。
+11. standalone/IDE 组合测试验证同一 binary、HostConfig 优先级、显式 workspace/default cwd、标准 Python venv 的 `VIRTUAL_ENV` + `PATH`/`Path` 注入、Conda/custom startup command 的方言适配与 rebuild 重放、初始化失败清理、runtime instructions、动态工具 description 和 `shell_list.runtime/host` 脱敏摘要；并验证 Server 不扫描 `.venv`/Poetry/Conda、不依赖 `Activate.ps1`、MCP roots 或编辑器标识环境变量，且不回显 env value/startup command/secret。
 
 ## 12. 实施顺序
 
@@ -1006,8 +1024,9 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 | 平台分层 | Shell Domain 只依赖 `ShellDialect`、`PtyTransport`、`ProcessSupervisor` Runtime Ports |
 | Runtime Profile 选择 | V1 启动时选择 `auto|posix-bash|windows-pwsh`，一个进程只使用一个完整 Profile |
 | Windows 路线 | V1；先做 pywinpty/ConPTY 与 Job Object/process-tree 监管实验，再冻结合同和实现 |
-| Host Profile | `standalone|ide` 共用 Server 与七工具；只改变显式 workspace 配置和宿主生命周期 |
-| Agent 感知 | instructions + 动态工具描述 + `shell_list.runtime/host`；resource 仅作补充，不依赖 MCP roots |
+| Host Profile | `standalone|ide` 共用 Server 与七工具；以不可变 HostConfig 表达 workspace/default cwd、宿主环境和 startup command 差异 |
+| 环境初始化 | IDE/launcher 负责解析；标准 Python venv 注入 `VIRTUAL_ENV` + `PATH`/`Path`，Conda/custom 可用方言专属 startup command；Server 不扫描项目环境 |
+| Agent 感知 | instructions + 动态工具描述 + `shell_list.runtime/host` 脱敏摘要；不暴露 env/startup command/secret，resource 仅作补充，不依赖 MCP roots |
 | ide4ai 复用方式 | 抽取 pexpect 核心与测试，不依赖完整 IDE4AI |
 | 持久 Command Shell 数量 | 每个 Server 可创建多个，由 `shell_id` 显式寻址并受数量上限约束 |
 | 短/长命令 | 统一使用 `shell_exec`；超过 `yield_ms` 返回 `running` 和 `exec_id` |
