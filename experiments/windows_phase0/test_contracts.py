@@ -18,8 +18,11 @@ from experiments.windows_phase0.contracts import (
     Observation,
     Outcome,
     evaluate_gates,
+    observe_backpressure,
+    prepare_output_directory,
     summary_payload,
     validate_environment,
+    validate_toolchain,
 )
 
 
@@ -245,3 +248,91 @@ def test_native_environment_rejects_wrong_architecture_or_server_or_windows_10(
             _windows_environment(**overrides),
             EnvironmentTier.NATIVE_GATE,
         )
+
+
+class _WaitSignal:
+    def __init__(self, result: bool) -> None:
+        self.result = result
+        self.deadlines: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.deadlines.append(timeout)
+        return self.result
+
+
+def test_backpressure_requires_started_writer_that_remains_pending() -> None:
+    started = _WaitSignal(True)
+    pending = _WaitSignal(False)
+
+    established = observe_backpressure(
+        started,
+        pending,
+        start_deadline_seconds=1.0,
+        establish_deadline_seconds=0.25,
+    )
+
+    assert established
+    assert started.deadlines == [1.0]
+    assert pending.deadlines == [0.25]
+
+
+def test_backpressure_is_not_established_when_writer_already_finished() -> None:
+    assert not observe_backpressure(
+        _WaitSignal(True),
+        _WaitSignal(True),
+        start_deadline_seconds=1.0,
+        establish_deadline_seconds=0.25,
+    )
+
+
+def test_output_directory_must_be_empty_to_prevent_stale_decisions(tmp_path) -> None:
+    output = tmp_path / "evidence"
+    output.mkdir()
+    stale_summary = output / "summary.json"
+    stale_summary.write_text('{"decision_ready":true}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="must be empty"):
+        prepare_output_directory(output)
+
+    assert stale_summary.read_text(encoding="utf-8") == '{"decision_ready":true}'
+
+
+def test_output_directory_is_created_when_absent(tmp_path) -> None:
+    output = tmp_path / "evidence"
+
+    prepare_output_directory(output)
+
+    assert output.is_dir()
+    assert list(output.iterdir()) == []
+
+
+def test_toolchain_contract_accepts_only_pinned_x64_versions() -> None:
+    validate_toolchain(
+        python_version="3.12.10",
+        python_architecture="AMD64",
+        pywinpty_version="3.0.5",
+        uv_version="uv 0.8.17 (build)",
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"python_version": "3.12.11"},
+        {"python_architecture": "ARM64"},
+        {"pywinpty_version": "3.0.6"},
+        {"uv_version": "uv 0.8.18 (build)"},
+    ),
+)
+def test_toolchain_contract_rejects_unpinned_or_non_x64_versions(
+    overrides: dict[str, str],
+) -> None:
+    values = {
+        "python_version": "3.12.10",
+        "python_architecture": "AMD64",
+        "pywinpty_version": "3.0.5",
+        "uv_version": "uv 0.8.17 (build)",
+        **overrides,
+    }
+    with pytest.raises(RuntimeError):
+        validate_toolchain(**values)

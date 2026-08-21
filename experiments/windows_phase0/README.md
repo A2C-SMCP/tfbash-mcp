@@ -38,10 +38,13 @@ uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
   --output-dir artifacts/windows-phase0-native
 ```
 
-If `pwsh.exe` is not on `PATH`, add `--pwsh C:\path\to\pwsh.exe`. The command
-returns zero only when the native gate is complete and every acceptance rule
-passes. It can take several minutes because the lifecycle matrix contains 260
-repeated observations across the two ownership candidates and runtime gates.
+If `pwsh.exe` is not on `PATH`, add `--pwsh C:\path\to\pwsh.exe`. The output
+directory must be absent or empty so a failed rerun cannot retain an older
+decision summary. The command returns zero only when every acceptance rule
+passes. A complete native failure is still decision-ready and recorded as
+`no-go`, but exits nonzero. It can take several minutes because the lifecycle
+matrix contains 260 repeated observations across the two ownership candidates
+and runtime gates.
 
 Return the complete `artifacts/windows-phase0-native` directory as a zip. It
 contains:

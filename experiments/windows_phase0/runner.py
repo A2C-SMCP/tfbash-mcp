@@ -37,15 +37,20 @@ from experiments.windows_phase0.contracts import (
     Observation,
     Outcome,
     evaluate_gates,
+    observe_backpressure,
+    prepare_output_directory,
     summary_payload,
     validate_environment,
+    validate_toolchain,
 )
 from experiments.windows_phase0.windows_api import (
     KillOnCloseJob,
     NamedManualResetEvent,
+    ProcessExitMonitor,
     ProcessIdentity,
     descendant_identities,
     identity_is_alive,
+    is_missing_process_error,
     process_identity,
     taskkill_tree,
     wait_for_exit,
@@ -93,6 +98,10 @@ def _command_version(command: str) -> str:
         check=False,
     )
     return completed.stdout.strip() if completed.returncode == 0 else "unavailable"
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _python_command(source: str, *arguments: str) -> str:
@@ -197,6 +206,37 @@ def _safe_kill_session(session: ConPtySession) -> None:
         session.cancel_reader()
 
 
+def _close_session_verified(session: ConPtySession) -> None:
+    """Close a session and fail the gate if identity-fenced forced cleanup was needed."""
+
+    try:
+        identity = process_identity(session.pid)
+    except OSError as exc:
+        if not is_missing_process_error(exc):
+            raise
+        identity = None
+    except RuntimeError:
+        identity = None
+
+    try:
+        session.close()
+    except Exception as close_error:
+        cleanup: dict[str, object] | None = None
+        if identity is not None:
+            cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
+            if not bool(cleanup["all_exited"]):
+                raise RuntimeError(
+                    f"session close failed and forced cleanup was incomplete: {cleanup}"
+                ) from close_error
+        raise RuntimeError(
+            f"session close failed and required forced cleanup: {cleanup}"
+        ) from close_error
+
+    if identity is not None and identity_is_alive(identity):
+        cleanup = taskkill_tree(identity, force=True, timeout_seconds=5.0)
+        raise RuntimeError(f"session remained alive after close: {cleanup}")
+
+
 def _with_session(
     operation: Callable[[ConPtySession], dict[str, object]], pwsh: str
 ) -> dict[str, object]:
@@ -205,10 +245,7 @@ def _with_session(
         session.start()
         return operation(session)
     finally:
-        try:
-            session.close()
-        except Exception:
-            _safe_kill_session(session)
+        _close_session_verified(session)
 
 
 def run_basic_contracts(log: ExperimentLog, pwsh: str) -> None:
@@ -386,9 +423,12 @@ def _backpressure_scenario(session: ConPtySession) -> dict[str, object]:
 
     writer = threading.Thread(target=write_payload, name="phase0-backpressure-writer", daemon=True)
     writer.start()
-    if not writer_started.wait(1.0):
-        raise RuntimeError("backpressure writer did not start")
-    backpressure_established = not write_done.wait(BACKPRESSURE_ESTABLISH_SECONDS)
+    backpressure_established = observe_backpressure(
+        writer_started,
+        write_done,
+        start_deadline_seconds=1.0,
+        establish_deadline_seconds=BACKPRESSURE_ESTABLISH_SECONDS,
+    )
 
     def send_control() -> None:
         try:
@@ -468,6 +508,7 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
     session = ConPtySession(pwsh)
     late_identity: ProcessIdentity | None = None
     with (
+        TreeReporter() as late_ack_reporter,
         NamedManualResetEvent(f"Local\\tfbash-late-{uuid.uuid4().hex}") as late_release,
         NamedManualResetEvent(f"Local\\tfbash-next-{uuid.uuid4().hex}") as next_finish,
     ):
@@ -480,7 +521,8 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
             "import subprocess,sys\n"
             "process=subprocess.Popen([sys.executable,'-u',sys.argv[1],"
             "'--event',sys.argv[2],'--before-wait-token',sys.argv[3],"
-            "'--after-wait-token',sys.argv[4]],stdin=subprocess.DEVNULL)\n"
+            "'--after-wait-token',sys.argv[4],'--ack-host',sys.argv[5],"
+            "'--ack-port',sys.argv[6]],stdin=subprocess.DEVNULL)\n"
             f"print({spawn_marker!r}+str(process.pid), flush=True)"
         )
         try:
@@ -492,6 +534,8 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                     late_release.name,
                     late_ready,
                     late_token,
+                    late_ack_reporter.host,
+                    str(late_ack_reporter.port),
                 )
             )
             session.wait_for_text(late_ready, first_ticket.cursor, 5.0)
@@ -501,28 +545,48 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 raise RuntimeError("late-output child PID marker was missing")
             late_identity = process_identity(int(match.group(1)))
 
-            next_ticket = session.start_script(
-                _late_fixture_command(next_finish.name, next_ready, next_done)
-            )
-            session.wait_for_text(next_ready, next_ticket.cursor, 5.0)
-            late_release.set()
-            late_exited = wait_for_exit((late_identity,), 5.0)
-            if not late_exited:
+            with ProcessExitMonitor(late_identity) as exit_monitor:
+                next_ticket = session.start_script(
+                    _late_fixture_command(next_finish.name, next_ready, next_done)
+                )
+                session.wait_for_text(next_ready, next_ticket.cursor, 5.0)
+                late_release.set()
+                ack = late_ack_reporter.collect(1, 5.0)[0]
+                late_exit_code = exit_monitor.wait(5.0)
+            if late_exit_code is None:
                 raise TimeoutError("late-output child did not exit after release")
             next_finish.set()
             next_result = session.await_script(next_ticket, 5.0)
+            barrier_token = f"BARRIER_{uuid.uuid4().hex}"
+            barrier_result = session.run_script(
+                f"[Console]::Out.WriteLine({powershell_literal(barrier_token)})"
+            )
 
             first_terminal_count = first_result.raw_output.count(first_ticket.end_marker)
             next_terminal_count = next_result.raw_output.count(next_ticket.end_marker)
             late_contaminated_next = late_token in next_result.output
+            late_contaminated_barrier = late_token in barrier_result.output
+            transcript = session.output_since(first_ticket.cursor)
+            transcript_token_count = transcript.count(late_token)
+            ack_valid = ack == {
+                "pid": late_identity.pid,
+                "status": "stdout-flushed",
+                "token": late_token,
+            }
             passed = (
                 first_result.exit_code == 0
                 and next_result.exit_code == 0
+                and barrier_result.exit_code == 0
+                and _normalized_output(barrier_result.output) == barrier_token + "\n"
                 and first_terminal_count == 1
                 and next_terminal_count == 1
                 and next_result.output.count(next_ready) == 1
                 and next_result.output.count(next_done) == 1
+                and ack_valid
+                and late_exit_code == 0
+                and transcript_token_count == 1
                 and not late_contaminated_next
+                and not late_contaminated_barrier
             )
             return {
                 "passed": passed,
@@ -531,7 +595,11 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 "next_ready_count": next_result.output.count(next_ready),
                 "next_done_count": next_result.output.count(next_done),
                 "late_contaminated_next_execution": late_contaminated_next,
-                "late_child_exited_before_next_finished": late_exited,
+                "late_contaminated_barrier_execution": late_contaminated_barrier,
+                "late_stdout_ack": ack,
+                "late_stdout_ack_valid": ack_valid,
+                "late_exit_code": late_exit_code,
+                "transcript_token_count": transcript_token_count,
                 "late_pid": late_identity.pid,
                 "contract": "output emitted after terminal must not enter the next execution",
             }
@@ -544,10 +612,7 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 if identity_is_alive(late_identity):
                     with suppress(OSError):
                         taskkill_tree(late_identity, force=True, timeout_seconds=2.0)
-            try:
-                session.close()
-            except Exception:
-                _safe_kill_session(session)
+            _close_session_verified(session)
 
 
 def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
@@ -555,6 +620,7 @@ def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int)
         started = monotonic()
         tail = f"TAIL_{iteration}_{uuid.uuid4().hex}"
         session = ConPtySession(pwsh)
+        session_closed = False
         try:
             session.start()
             source = f"import sys\nsys.stdout.write('x'*{TAIL_BYTES}+{tail!r})\nsys.stdout.flush()"
@@ -562,26 +628,27 @@ def run_tail_and_terminal_gates(log: ExperimentLog, pwsh: str, repetitions: int)
             result = session.await_script(ticket, 15.0)
             tail_count = result.output.count(tail)
             exact_output = result.output == "x" * TAIL_BYTES + tail
+            details = {
+                "tail_count": tail_count,
+                "output_characters": len(result.output),
+                "expected_characters": TAIL_BYTES + len(tail),
+                "exact_output": exact_output,
+                "exit_code": result.exit_code,
+            }
+            _close_session_verified(session)
+            session_closed = True
             log.add(
                 "tail_drain",
                 iteration,
                 result.exit_code == 0 and tail_count == 1 and exact_output,
                 round((monotonic() - started) * 1000),
-                {
-                    "tail_count": tail_count,
-                    "output_characters": len(result.output),
-                    "expected_characters": TAIL_BYTES + len(tail),
-                    "exact_output": exact_output,
-                    "exit_code": result.exit_code,
-                },
+                details,
             )
         except Exception as exc:
             log.failed("tail_drain", iteration, started, exc)
             _safe_kill_session(session)
         finally:
-            try:
-                session.close()
-            except Exception:
+            if not session_closed:
                 _safe_kill_session(session)
 
     for iteration in range(1, repetitions + 1):
@@ -605,6 +672,7 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
         started = monotonic()
         session = ConPtySession(pwsh)
         rebuilt: ConPtySession | None = None
+        session_closed = False
         try:
             session.start()
             ready = f"READY_{uuid.uuid4().hex}"
@@ -656,6 +724,11 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
                         probe_seen = probe in result.output
                         shell_rebuilt = probe_seen
             control_ms = round((monotonic() - control_started) * 1000)
+            if rebuilt is not None:
+                _close_session_verified(rebuilt)
+                rebuilt = None
+            _close_session_verified(session)
+            session_closed = True
             log.add(
                 "interrupt_recovery",
                 iteration,
@@ -673,13 +746,10 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
         except Exception as exc:
             log.failed("interrupt_recovery", iteration, started, exc)
             _safe_kill_session(session)
-        finally:
             if rebuilt is not None:
-                with suppress(Exception):
-                    rebuilt.close()
-            try:
-                session.close()
-            except Exception:
+                _safe_kill_session(rebuilt)
+        finally:
+            if not session_closed:
                 _safe_kill_session(session)
 
 
@@ -758,6 +828,7 @@ def run_timeout_rebuild_gate(log: ExperimentLog, pwsh: str, repetitions: int) ->
     for iteration in range(1, repetitions + 1):
         started = monotonic()
         session = ConPtySession(pwsh)
+        session_closed = False
         try:
             session.start()
             ready = f"READY_{uuid.uuid4().hex}="
@@ -782,6 +853,8 @@ def run_timeout_rebuild_gate(log: ExperimentLog, pwsh: str, repetitions: int) ->
             shell_identity = process_identity(session.pid)
             cleanup = taskkill_tree(shell_identity, force=True, timeout_seconds=5.0)
             session.cancel_reader()
+            _close_session_verified(session)
+            session_closed = True
 
             rebuilt = ConPtySession(pwsh)
             try:
@@ -790,7 +863,7 @@ def run_timeout_rebuild_gate(log: ExperimentLog, pwsh: str, repetitions: int) ->
                 probe = rebuilt.run_script(f"[Console]::Out.WriteLine({powershell_literal(token)})")
                 rebuilt_ok = token in probe.output
             finally:
-                rebuilt.close()
+                _close_session_verified(rebuilt)
             passed = (
                 not soft_recovered
                 and bool(cleanup["all_exited"])
@@ -813,8 +886,8 @@ def run_timeout_rebuild_gate(log: ExperimentLog, pwsh: str, repetitions: int) ->
             log.failed("timeout_rebuild", iteration, started, exc)
             _safe_kill_session(session)
         finally:
-            with suppress(Exception):
-                session.close()
+            if not session_closed:
+                _safe_kill_session(session)
 
 
 def _tree_command(reporter: TreeReporter, event_name: str) -> str:
@@ -869,10 +942,7 @@ def _rebuild_probe(pwsh: str, deadline: float) -> bool:
         )
         return result.exit_code == 0 and _normalized_output(result.output) == token + "\n"
     finally:
-        try:
-            rebuilt.close()
-        except Exception:
-            _safe_kill_session(rebuilt)
+        _close_session_verified(rebuilt)
 
 
 def _run_toolhelp_tree_once(pwsh: str, action: str) -> dict[str, object]:
@@ -915,7 +985,7 @@ def _run_toolhelp_tree_once(pwsh: str, action: str) -> dict[str, object]:
                 max(0.0, deadline - monotonic()),
             )
             session.cancel_reader()
-            session.close()
+            _close_session_verified(session)
             session_closed = True
             survivors = [identity.pid for identity in all_identities if identity_is_alive(identity)]
             expected_rebuild = action in {"terminate", "kill"}
@@ -984,7 +1054,7 @@ def _run_job_tree_once(pwsh: str, action: str) -> dict[str, object]:
                 max(0.0, deadline - monotonic()),
             )
             session.cancel_reader()
-            session.close()
+            _close_session_verified(session)
             session_closed = True
             survivors = [identity.pid for identity in all_identities if identity_is_alive(identity)]
             expected_rebuild = action in {"terminate", "kill"}
@@ -1061,18 +1131,28 @@ def collect_environment(pwsh: str, tier: EnvironmentTier, runner_commit: str) ->
     windows = json.loads(completed.stdout.strip())
     if not isinstance(windows, dict):
         raise RuntimeError("PowerShell environment probe did not return an object")
+    python_version = platform.python_version()
+    python_architecture = platform.machine()
+    pywinpty_version = winpty.__version__
+    uv_version = _command_version("uv")
     environment = {
         "environment_tier": tier.value,
-        "python": platform.python_version(),
-        "python_architecture": platform.machine(),
-        "pywinpty": winpty.__version__,
-        "uv": _command_version("uv"),
+        "python": python_version,
+        "python_architecture": python_architecture,
+        "pywinpty": pywinpty_version,
+        "uv": uv_version,
         "platform": platform.platform(),
         "runner_commit": runner_commit,
         "runner_script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "windows": windows,
     }
     validate_environment(windows, tier)
+    validate_toolchain(
+        python_version=python_version,
+        python_architecture=python_architecture,
+        pywinpty_version=pywinpty_version,
+        uv_version=uv_version,
+    )
     return environment
 
 
@@ -1085,6 +1165,11 @@ def write_summary(
     summary = evaluate_gates(observations, tier)
     payload = summary_payload(summary)
     payload["environment"] = environment
+    evidence_files = {
+        "environment.json": _file_sha256(output_dir / "environment.json"),
+        "observations.jsonl": _file_sha256(output_dir / "observations.jsonl"),
+    }
+    payload["evidence_files_sha256"] = evidence_files
     (output_dir / "summary.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1097,6 +1182,8 @@ def write_summary(
         f"- Contract passed: `{summary.contract_passed}`",
         f"- Decision ready: `{summary.decision_ready}`",
         f"- Decision: `{summary.decision.value}`",
+        f"- environment.json SHA-256: `{evidence_files['environment.json']}`",
+        f"- observations.jsonl SHA-256: `{evidence_files['observations.jsonl']}`",
         "",
         "| Scenario | Passed | Failed | Skipped | Required | Accepted |",
         "|---|---:|---:|---:|---:|---|",
@@ -1148,7 +1235,7 @@ def main() -> int:
         raise ValueError("repetitions must be positive")
     tier = EnvironmentTier(args.environment_tier)
     output_dir: Path = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    prepare_output_directory(output_dir)
     environment = collect_environment(
         str(args.pwsh),
         tier,

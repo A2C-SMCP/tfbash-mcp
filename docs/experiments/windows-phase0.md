@@ -1,6 +1,12 @@
 # Windows V1 Phase 0 experiment report
 
-Status: hosted smoke complete; native Windows 11 gate pending.
+Status: the original hosted smoke is superseded; hardened hosted rerun and
+native Windows 11 gate pending.
+
+> Do not use commit `5b33c4653aab30627de421a13643cd907bef9b12` for the native
+> gate. Its evidence is retained below as historical context, but later review
+> found decision-gate weaknesses. A new native handoff will be published only
+> after the hardened runner completes hosted smoke and code review.
 
 ## Decision
 
@@ -72,10 +78,11 @@ sequences therefore cannot be represented faithfully. Issue #2 must not freeze
 the base64 raw-byte contract against this transport without a byte-capable
 input path.
 
-## Native gate handoff
+## Native gate handoff (blocked pending hardened rerun)
 
-Run the exact commit above on Windows 11 x64 with Python 3.12 and PowerShell
-7.6.x:
+Do not run the historical commit above on Windows 11. The replacement command
+will use the same pinned toolchain below, but its exact reviewed commit and
+package hash remain pending:
 
 ```powershell
 uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
@@ -85,7 +92,8 @@ uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
   --output-dir artifacts/windows-phase0-native
 ```
 
-Return the complete `artifacts/windows-phase0-native` directory without
-editing it. The native run is decision-ready only when `summary.json` reports
-`"decision_ready": true`; a nonzero process exit is expected when any fixed
-gate fails and must not prevent returning the raw artifact.
+Once the replacement handoff is published, return the complete
+`artifacts/windows-phase0-native` directory without editing it. Complete native
+evidence is decision-ready whether it produces `go` or `no-go`; a nonzero
+process exit is expected for `no-go` and must not prevent returning the raw
+artifact.

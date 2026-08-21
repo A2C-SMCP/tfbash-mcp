@@ -374,6 +374,46 @@ def wait_for_exit(identities: Iterable[ProcessIdentity], timeout_seconds: float)
     return False
 
 
+class ProcessExitMonitor:
+    """Retain an identity-fenced handle so a fast exit code remains observable."""
+
+    def __init__(self, identity: ProcessIdentity) -> None:
+        process = _open_matching_process(identity, SYNCHRONIZE)
+        if process is None:
+            raise RuntimeError(f"process {identity.pid} exited before monitoring began")
+        self._identity = identity
+        self._process = process
+
+    def wait(self, timeout_seconds: float) -> int | None:
+        """Return the exit code, or None when the deadline expires."""
+
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        kernel32 = self._process._kernel32
+        values = (wintypes.HANDLE * 1)(ctypes.c_void_p(self._process.value))
+        milliseconds = min(round(timeout_seconds * 1000), INFINITE - 1)
+        result = kernel32.WaitForMultipleObjects(1, values, True, milliseconds)
+        if result == WAIT_TIMEOUT:
+            return None
+        if result != WAIT_OBJECT_0:
+            _raise_last_error(f"WaitForMultipleObjects({self._identity.pid}) failed")
+        exit_code = _exit_code_from_handle(self._process, self._identity.pid)
+        if exit_code == STILL_ACTIVE:
+            raise RuntimeError(
+                f"process {self._identity.pid} was signaled but still reports STILL_ACTIVE"
+            )
+        return exit_code
+
+    def close(self) -> None:
+        self._process.close()
+
+    def __enter__(self) -> ProcessExitMonitor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
 def taskkill_tree(
     root: ProcessIdentity, *, force: bool, timeout_seconds: float
 ) -> dict[str, object]:

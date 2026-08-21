@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import os
+import socket
 from ctypes import wintypes
 
 SYNCHRONIZE = 0x00100000
@@ -17,6 +19,8 @@ def main() -> int:
     parser.add_argument("--event", required=True)
     parser.add_argument("--before-wait-token", required=True)
     parser.add_argument("--after-wait-token", required=True)
+    parser.add_argument("--ack-host")
+    parser.add_argument("--ack-port", type=int)
     args = parser.parse_args()
     if os.name != "nt":
         raise RuntimeError("late-output fixture requires Windows")
@@ -40,6 +44,18 @@ def main() -> int:
             error = ctypes.get_last_error()
             raise OSError(error, f"WaitForSingleObject failed: {ctypes.FormatError(error)}")
         print(args.after_wait_token, flush=True)
+        if (args.ack_host is None) != (args.ack_port is None):
+            raise ValueError("ack-host and ack-port must be provided together")
+        if args.ack_host is not None and args.ack_port is not None:
+            with socket.create_connection(
+                (args.ack_host, args.ack_port), timeout=5.0
+            ) as connection:
+                payload = {
+                    "pid": os.getpid(),
+                    "status": "stdout-flushed",
+                    "token": args.after_wait_token,
+                }
+                connection.sendall((json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
     finally:
         kernel32.CloseHandle(handle)
     return 0

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TextIO
+from typing import Protocol, TextIO
 
 
 class EnvironmentTier(str, Enum):
@@ -103,6 +103,57 @@ class DecisionSummary:
     contract_passed: bool
     decision_ready: bool
     decision: Decision
+
+
+class WaitSignal(Protocol):
+    """Minimal event interface used by the backpressure decision helper."""
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+def observe_backpressure(
+    writer_started: WaitSignal,
+    writer_done: WaitSignal,
+    *,
+    start_deadline_seconds: float,
+    establish_deadline_seconds: float,
+) -> bool:
+    """Prove a writer started and remained pending for a bounded interval."""
+
+    if not writer_started.wait(start_deadline_seconds):
+        raise RuntimeError("backpressure writer did not start")
+    return not writer_done.wait(establish_deadline_seconds)
+
+
+def prepare_output_directory(path: Path) -> None:
+    """Create a fresh evidence directory and reject any pre-existing contents."""
+
+    if path.exists():
+        if not path.is_dir():
+            raise RuntimeError(f"evidence output path is not a directory: {path}")
+        if next(path.iterdir(), None) is not None:
+            raise RuntimeError(f"evidence output directory must be empty: {path}")
+        return
+    path.mkdir(parents=True)
+
+
+def validate_toolchain(
+    *,
+    python_version: str,
+    python_architecture: str,
+    pywinpty_version: str,
+    uv_version: str,
+) -> None:
+    """Fail closed when evidence is produced by a different experiment toolchain."""
+
+    if python_version != "3.12.10":
+        raise RuntimeError(f"Python 3.12.10 is required, observed {python_version}")
+    if python_architecture.upper() not in {"AMD64", "X86_64"}:
+        raise RuntimeError(f"x64 Python is required, observed architecture {python_architecture}")
+    if pywinpty_version != "3.0.5":
+        raise RuntimeError(f"pywinpty 3.0.5 is required, observed {pywinpty_version}")
+    if not uv_version.startswith("uv 0.8.17 "):
+        raise RuntimeError(f"uv 0.8.17 is required, observed {uv_version}")
 
 
 def validate_environment(windows: dict[str, object], tier: EnvironmentTier) -> None:
