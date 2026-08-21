@@ -377,15 +377,32 @@ def taskkill_tree(
         if force:
             command.append("/F")
         started = monotonic()
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        timed_out = False
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=max(timeout_seconds, 0.001),
+            )
+            returncode: int | None = completed.returncode
+            stdout = completed.stdout.strip()
+            stderr = completed.stderr.strip()
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            returncode = None
+            stdout = "" if exc.stdout is None else str(exc.stdout).strip()
+            stderr = "" if exc.stderr is None else str(exc.stderr).strip()
         all_exited = wait_for_exit(
             identities,
             max(0.0, timeout_seconds - (monotonic() - started)),
         )
         return {
-            "returncode": completed.returncode,
-            "stdout": completed.stdout.strip(),
-            "stderr": completed.stderr.strip(),
+            "returncode": returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timed_out": timed_out,
             "discovered": len(discovered),
             "all_exited": all_exited,
             "survivors": [identity.pid for identity in identities if identity_is_alive(identity)],

@@ -51,6 +51,7 @@ from experiments.windows_phase0.windows_api import (
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 TREE_FIXTURE = EXPERIMENT_DIR / "tree_fixture.py"
 CONTROL_DEADLINE_SECONDS = 3.0
+SOFT_INTERRUPT_SECONDS = 0.75
 TREE_DEADLINE_SECONDS = 10.0
 TAIL_BYTES = 262_144
 
@@ -423,27 +424,79 @@ def run_interrupt_gate(log: ExperimentLog, pwsh: str, repetitions: int) -> None:
     for iteration in range(1, repetitions + 1):
         started = monotonic()
         session = ConPtySession(pwsh)
+        rebuilt: ConPtySession | None = None
         try:
             session.start()
             ready = f"READY_{uuid.uuid4().hex}"
             source = f"import threading\nprint({ready!r}, flush=True)\nthreading.Event().wait(60)"
             ticket = session.start_script(_python_command(source))
             session.wait_for_text(ready, ticket.cursor, 5.0)
+            shell_identity = process_identity(session.pid)
             control_started = monotonic()
             accepted = session.interrupt()
-            result = session.await_script(ticket, CONTROL_DEADLINE_SECONDS)
+            prompt_recovered = False
+            shell_rebuilt = False
+            cleanup: dict[str, object] | None = None
+            probe_seen = False
+            try:
+                session.wait_for_text(
+                    session.prompt_marker,
+                    ticket.cursor,
+                    SOFT_INTERRUPT_SECONDS,
+                )
+                remaining = CONTROL_DEADLINE_SECONDS - (monotonic() - control_started)
+                if remaining > 0:
+                    probe = f"INTERRUPT_PROBE_{uuid.uuid4().hex}"
+                    result = session.run_script(
+                        f"[Console]::Out.WriteLine({powershell_literal(probe)})",
+                        remaining,
+                    )
+                    probe_seen = probe in result.output
+                    prompt_recovered = probe_seen
+            except (EOFError, RuntimeError, TimeoutError):
+                remaining = max(0.0, CONTROL_DEADLINE_SECONDS - (monotonic() - control_started))
+                cleanup = taskkill_tree(
+                    shell_identity,
+                    force=True,
+                    timeout_seconds=remaining,
+                )
+                with suppress(Exception):
+                    session.cancel_reader()
+                remaining = CONTROL_DEADLINE_SECONDS - (monotonic() - control_started)
+                if remaining > 0 and bool(cleanup["all_exited"]):
+                    rebuilt = ConPtySession(pwsh)
+                    rebuilt.start(timeout_seconds=remaining)
+                    remaining = CONTROL_DEADLINE_SECONDS - (monotonic() - control_started)
+                    if remaining > 0:
+                        probe = f"REBUILT_INTERRUPT_{uuid.uuid4().hex}"
+                        result = rebuilt.run_script(
+                            f"[Console]::Out.WriteLine({powershell_literal(probe)})",
+                            remaining,
+                        )
+                        probe_seen = probe in result.output
+                        shell_rebuilt = probe_seen
             control_ms = round((monotonic() - control_started) * 1000)
             log.add(
                 "interrupt_recovery",
                 iteration,
-                accepted > 0 and control_ms <= 3000 and result.exit_code != 0,
+                accepted > 0 and control_ms <= 3000 and (prompt_recovered or shell_rebuilt),
                 round((monotonic() - started) * 1000),
-                {"accepted_characters": accepted, "control_ms": control_ms},
+                {
+                    "accepted_characters": accepted,
+                    "control_ms": control_ms,
+                    "prompt_recovered": prompt_recovered,
+                    "shell_rebuilt": shell_rebuilt,
+                    "probe_seen": probe_seen,
+                    "cleanup": cleanup,
+                },
             )
         except Exception as exc:
             log.failed("interrupt_recovery", iteration, started, exc)
             _safe_kill_session(session)
         finally:
+            if rebuilt is not None:
+                with suppress(Exception):
+                    rebuilt.close()
             try:
                 session.close()
             except Exception:
