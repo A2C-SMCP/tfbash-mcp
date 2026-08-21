@@ -249,7 +249,12 @@ class ConPtySession:
         pty = self._require_pty()
         pty.cancel_io()
 
-    def close(self, timeout_seconds: float = 5.0) -> None:
+    def close(
+        self,
+        timeout_seconds: float = 5.0,
+        *,
+        process_exited: Callable[[], bool] | None = None,
+    ) -> None:
         if self._pty is None:
             return
         if not self._reader_done:
@@ -261,7 +266,10 @@ class ConPtySession:
                 if not self.wait_for_eof(timeout_seconds):
                     raise TimeoutError("ConPTY reader did not terminate after cancellation")
         pty = self._require_pty()
-        if pty.isalive():
+        if process_exited is not None:
+            if not process_exited():
+                raise RuntimeError("ConPTY process identity remained alive after close")
+        elif pty.isalive():
             raise RuntimeError("ConPTY process remained alive after close")
         self._pty = None
 

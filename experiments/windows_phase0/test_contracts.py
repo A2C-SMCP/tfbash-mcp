@@ -195,6 +195,16 @@ def test_close_rejects_a_live_process_even_after_reader_stopped() -> None:
         session.close()
 
 
+def test_close_prefers_identity_fence_over_stale_pywinpty_liveness() -> None:
+    session = ConPtySession("pwsh")
+    session._pty = _FakePty()  # type: ignore[assignment]
+    session._reader_done = True
+
+    session.close(process_exited=lambda: True)
+
+    assert session._pty is None
+
+
 def test_write_entry_probe_runs_immediately_before_transport_write() -> None:
     session = ConPtySession("pwsh")
     fake = _FakePty()

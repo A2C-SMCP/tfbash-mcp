@@ -12,7 +12,6 @@ import argparse
 import base64
 import hashlib
 import json
-import ntpath
 import os
 import platform
 import re
@@ -228,7 +227,11 @@ def _close_session_verified(session: ConPtySession) -> None:
         identity = None
 
     try:
-        session.close()
+        session.close(
+            process_exited=(
+                (lambda: True) if identity is None else (lambda: not identity_is_alive(identity))
+            )
+        )
     except Exception as close_error:
         cleanup: dict[str, object] | None = None
         if identity is not None:
@@ -301,14 +304,14 @@ def _persistent_state_scenario(session: ConPtySession) -> dict[str, object]:
         "ExpectedCwd=$global:TF_PHASE0_EXPECTED_CWD} | ConvertTo-Json -Compress"
     )
     observed = json.loads(_normalized_output(result.output).strip())
-    cwd = ntpath.normcase(ntpath.normpath(str(observed["Cwd"])))
-    expected_cwd = ntpath.normcase(ntpath.normpath(str(observed["ExpectedCwd"])))
+    cwd = str(observed["Cwd"])
+    expected_cwd = str(observed["ExpectedCwd"])
     return {
         "passed": (
             setup.exit_code == 0
             and result.exit_code == 0
             and observed["State"] == token
-            and cwd == expected_cwd
+            and os.path.samefile(cwd, expected_cwd)
         ),
         "setup_exit_code": setup.exit_code,
         "probe_exit_code": result.exit_code,
@@ -356,7 +359,7 @@ def _text_stdin_scenario(session: ConPtySession) -> dict[str, object]:
     result = session.await_script(ticket, 5.0)
     encoded = base64.b64encode((expected + "\r\n").encode()).decode()
     observed = _normalized_output(result.output)
-    expected_output = f"{ready}\n{done}{encoded}\n"
+    expected_output = f"{ready}\n{expected}\n{done}{encoded}\n"
     return {
         "passed": result.exit_code == 0 and observed == expected_output,
         "expected_base64": encoded,
@@ -380,7 +383,7 @@ def _raw_nul_scenario(session: ConPtySession) -> dict[str, object]:
     result = session.await_script(ticket, 5.0)
     expected = base64.b64encode(b"\x00\r\n").decode()
     observed = _normalized_output(result.output)
-    expected_output = f"{ready}\n{done}{expected}\n"
+    expected_output = f"{ready}\n^@\n{done}{expected}\n"
     return {
         "passed": result.exit_code == 0 and observed == expected_output,
         "expected_base64": expected,
@@ -551,11 +554,15 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 )
             )
             session.wait_for_text(late_ready, first_ticket.cursor, 5.0)
+            ready_ack = late_ack_reporter.collect(1, 5.0)[0]
             first_result = session.await_script(first_ticket, 5.0)
             match = re.search(re.escape(spawn_marker) + r"(\d+)", first_result.output)
             if match is None:
                 raise RuntimeError("late-output child PID marker was missing")
-            late_identity = process_identity(int(match.group(1)))
+            launcher_pid = int(match.group(1))
+            if ready_ack.get("status") != "ready" or ready_ack.get("token") != late_token:
+                raise RuntimeError(f"invalid late-output ready acknowledgement: {ready_ack}")
+            late_identity = process_identity(int(ready_ack["pid"]))
 
             with ProcessExitMonitor(late_identity) as exit_monitor:
                 next_ticket = session.start_script(
@@ -563,7 +570,7 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 )
                 session.wait_for_text(next_ready, next_ticket.cursor, 5.0)
                 late_release.set()
-                ack = late_ack_reporter.collect(1, 5.0)[0]
+                flushed_ack = late_ack_reporter.collect(1, 5.0)[0]
                 late_exit_code = exit_monitor.wait(5.0)
             if late_exit_code is None:
                 raise TimeoutError("late-output child did not exit after release")
@@ -580,7 +587,12 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
             late_contaminated_barrier = late_token in barrier_result.output
             transcript = session.output_since(first_ticket.cursor)
             transcript_token_count = transcript.count(late_token)
-            ack_valid = ack == {
+            ready_ack_valid = ready_ack == {
+                "pid": late_identity.pid,
+                "status": "ready",
+                "token": late_token,
+            }
+            flushed_ack_valid = flushed_ack == {
                 "pid": late_identity.pid,
                 "status": "stdout-flushed",
                 "token": late_token,
@@ -594,7 +606,8 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 and next_terminal_count == 1
                 and next_result.output.count(next_ready) == 1
                 and next_result.output.count(next_done) == 1
-                and ack_valid
+                and ready_ack_valid
+                and flushed_ack_valid
                 and late_exit_code == 0
                 and transcript_token_count == 1
                 and not late_contaminated_next
@@ -608,10 +621,13 @@ def _unique_terminal_scenario(pwsh: str) -> dict[str, object]:
                 "next_done_count": next_result.output.count(next_done),
                 "late_contaminated_next_execution": late_contaminated_next,
                 "late_contaminated_barrier_execution": late_contaminated_barrier,
-                "late_stdout_ack": ack,
-                "late_stdout_ack_valid": ack_valid,
+                "late_ready_ack": ready_ack,
+                "late_ready_ack_valid": ready_ack_valid,
+                "late_stdout_ack": flushed_ack,
+                "late_stdout_ack_valid": flushed_ack_valid,
                 "late_exit_code": late_exit_code,
                 "transcript_token_count": transcript_token_count,
+                "launcher_pid": launcher_pid,
                 "late_pid": late_identity.pid,
                 "contract": "output emitted after terminal must not enter the next execution",
             }
