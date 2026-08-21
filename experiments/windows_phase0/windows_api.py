@@ -310,15 +310,20 @@ def descendant_identities(root: ProcessIdentity) -> tuple[ProcessIdentity, ...]:
     for entry in process_snapshot():
         children.setdefault(entry.parent_pid, []).append(entry.pid)
 
-    pending = list(children.get(root.pid, []))
+    pending = [(root, pid) for pid in children.get(root.pid, [])]
     descendants: list[ProcessIdentity] = []
     while pending:
-        pid = pending.pop()
-        pending.extend(children.get(pid, []))
+        parent, pid = pending.pop()
         try:
-            descendants.append(process_identity(pid))
+            child = process_identity(pid)
         except OSError:
             continue
+        # Toolhelp exposes only PPIDs. A stale PPID can equal a newly reused PID,
+        # but a genuine child cannot have been created before its parent.
+        if child.creation_time_100ns <= parent.creation_time_100ns:
+            continue
+        descendants.append(child)
+        pending.extend((child, grandchild) for grandchild in children.get(pid, []))
     return tuple(descendants)
 
 

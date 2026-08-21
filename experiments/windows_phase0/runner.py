@@ -662,9 +662,12 @@ def _reported_identities(
     if set(by_role) != {"parent", "child", "grandchild"}:
         raise RuntimeError(f"unexpected process-tree roles: {sorted(by_role)}")
     identities = {role: process_identity(int(report["pid"])) for role, report in by_role.items()}
+    parent_descendants = {identity.pid for identity in descendant_identities(identities["parent"])}
+    child_descendants = {identity.pid for identity in descendant_identities(identities["child"])}
     hierarchy = (
-        int(by_role["child"]["parent_pid"]) == identities["parent"].pid
-        and int(by_role["grandchild"]["parent_pid"]) == identities["child"].pid
+        identities["child"].pid in parent_descendants
+        and identities["grandchild"].pid in parent_descendants
+        and identities["grandchild"].pid in child_descendants
     )
     return identities, hierarchy
 
