@@ -25,6 +25,12 @@ Install Python 3.12, [uv](https://docs.astral.sh/uv/), and PowerShell 7.6.x on a
 Windows 11 x64 machine. From the repository root, run:
 
 ```powershell
+./experiments/windows_phase0/run_native.ps1
+```
+
+The script is equivalent to:
+
+```powershell
 uv run --python 3.12 --with pywinpty==3.0.5 -- `
   python -m experiments.windows_phase0.runner `
   --environment-tier native-gate `
