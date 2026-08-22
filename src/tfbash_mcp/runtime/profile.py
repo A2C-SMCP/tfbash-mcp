@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -68,8 +69,17 @@ class RuntimeProfile:
         request: SpawnRequest,
         *,
         cleanup_deadline_ms: int,
+        startup_deadline_ms: int | None = None,
     ) -> ManagedRuntimeSession:
         """Spawn under pre-established ownership and roll back on failure."""
+
+        if startup_deadline_ms is not None and startup_deadline_ms <= 0:
+            raise TransportError("PTY spawn deadline expired before ownership preparation")
+        deadline = (
+            None
+            if startup_deadline_ms is None
+            else time.monotonic() + startup_deadline_ms / 1000
+        )
 
         try:
             ownership = self.supervisor.prepare()
@@ -78,7 +88,18 @@ class RuntimeProfile:
         except Exception as prepare_error:
             raise ProcessControlError("failed to prepare process ownership") from prepare_error
         try:
-            session = self.transport.spawn(request, ownership)
+            remaining_ms = (
+                None
+                if deadline is None
+                else max(0, int((deadline - time.monotonic()) * 1000))
+            )
+            if remaining_ms is not None and remaining_ms <= 0:
+                raise TransportError("PTY spawn deadline expired after ownership preparation")
+            session = self.transport.spawn(
+                request,
+                ownership,
+                deadline_ms=remaining_ms,
+            )
         except Exception as spawn_error:
             try:
                 cleanup = self.supervisor.cleanup(

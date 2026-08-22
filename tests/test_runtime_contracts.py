@@ -60,6 +60,9 @@ class _Protocol:
     def recovery_input(self) -> bytes:
         return b"recover"
 
+    def begin_finalization(self) -> CommandFrame:
+        return CommandFrame("finalize", b"finalize")
+
     def feed(self, data: bytes) -> tuple[DialectEvent, ...]:
         return (DialectEvent(DialectEventKind.OUTPUT, data=data),)
 
@@ -74,7 +77,12 @@ class _Dialect:
     default_executable: str
     next_session: int = 0
 
-    def prepare_session(self, request: ShellStartRequest) -> DialectSessionPlan:
+    def prepare_session(
+        self,
+        request: ShellStartRequest,
+        *,
+        deadline_ms: int | None = None,
+    ) -> DialectSessionPlan:
         self.next_session += 1
         marker = f"marker-{self.next_session}"
         return DialectSessionPlan(
@@ -103,6 +111,8 @@ class _Transport:
         self,
         request: SpawnRequest,
         ownership: ProcessOwnership,
+        *,
+        deadline_ms: int | None = None,
     ) -> RuntimeSession:
         if self.fail_spawn:
             raise OSError("spawn failed")
@@ -154,6 +164,14 @@ class _Supervisor:
 
     def is_alive(self, ownership: ProcessOwnership) -> bool:
         return ownership.ownership_id in self.owners
+
+    def cleanup_execution(
+        self,
+        ownership: ProcessOwnership,
+        *,
+        deadline_ms: int,
+    ) -> CleanupResult:
+        return CleanupResult(reaped=True, remaining_managed_processes=0)
 
     def cleanup(
         self,

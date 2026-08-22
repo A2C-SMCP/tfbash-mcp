@@ -12,6 +12,7 @@ from tfbash_mcp.domain.errors import (
     ShellNotFound,
     ShellUnavailable,
 )
+from tfbash_mcp.domain.manager import CommandShellManager, ManagerConfig
 from tfbash_mcp.domain.models import (
     ChangeSignal,
     Clock,
@@ -25,12 +26,14 @@ from tfbash_mcp.domain.models import (
 )
 from tfbash_mcp.domain.output import OutputSlice, Utf8OutputBuffer
 from tfbash_mcp.domain.registry import IdFactory, ShellRegistry
+from tfbash_mcp.domain.worker import ShellWorker, WorkerConfig
 
 __all__ = [
     "CapacityExceeded",
     "ChangeSignal",
     "Clock",
     "CommandShell",
+    "CommandShellManager",
     "DomainError",
     "Execution",
     "ExecutionNotActive",
@@ -40,6 +43,7 @@ __all__ = [
     "IdFactory",
     "InvalidCursor",
     "InvalidTransition",
+    "ManagerConfig",
     "OutputSlice",
     "ShellBusy",
     "ShellClosing",
@@ -48,6 +52,8 @@ __all__ = [
     "ShellSnapshot",
     "ShellState",
     "ShellUnavailable",
+    "ShellWorker",
     "SystemClock",
     "Utf8OutputBuffer",
+    "WorkerConfig",
 ]

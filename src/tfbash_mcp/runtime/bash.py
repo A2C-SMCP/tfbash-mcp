@@ -48,6 +48,9 @@ class _ParserState(Enum):
     CAPTURING = auto()
     READING_RESULT = auto()
     FINALIZING = auto()
+    AWAITING_FINALIZATION = auto()
+    FINDING_FINALIZATION = auto()
+    FINALIZATION_PROMPT = auto()
     FINDING_RECOVERY = auto()
     READING_RECOVERY = auto()
     CLOSED = auto()
@@ -73,6 +76,12 @@ class _PendingRecovery:
     record_prefix: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingFinalization:
+    correlation_id: str
+    marker: bytes
+
+
 class BashDialect:
     """Create isolated Bash launch/parser pairs without importing pexpect."""
 
@@ -91,7 +100,14 @@ class BashDialect:
         self._token_factory = token_factory or (lambda: secrets.token_hex(16))
         self._max_control_bytes = max_control_bytes
 
-    def prepare_session(self, request: ShellStartRequest) -> DialectSessionPlan:
+    def prepare_session(
+        self,
+        request: ShellStartRequest,
+        *,
+        deadline_ms: int | None = None,
+    ) -> DialectSessionPlan:
+        if deadline_ms is not None and deadline_ms <= 0:
+            raise DialectProtocolError("Bash session preparation deadline expired")
         _validate_start_request(request)
         session_token = _validate_token(self._token_factory())
         protocol = BashProtocol(
@@ -137,6 +153,7 @@ class BashProtocol(DialectProtocol):
         self._pending_command: _PendingCommand | None = None
         self._pending_result: _PendingResult | None = None
         self._pending_recovery: _PendingRecovery | None = None
+        self._pending_finalization: _PendingFinalization | None = None
 
     def initial_input(self, startup_command: str | None) -> bytes:
         decoder = f'"${self._base64_variable}"'
@@ -237,6 +254,32 @@ class BashProtocol(DialectProtocol):
         )
         return script.encode() + b"\n"
 
+    def begin_finalization(self) -> CommandFrame:
+        """Flush job notifications behind a private marker and prompt acknowledgement."""
+
+        normal_completion = (
+            self._state is _ParserState.AWAITING_FINALIZATION
+            and self._pending_command is not None
+        )
+        recovered_completion = (
+            self._state is _ParserState.READY and self._pending_command is None
+        )
+        if (
+            not (normal_completion or recovered_completion)
+            or self._pending_finalization is not None
+        ):
+            raise DialectProtocolError("Bash protocol is not awaiting finalization")
+        token = _validate_token(self._token_factory())
+        correlation_id = f"finalize_{token}"
+        marker = _RECORD_SEPARATOR + f"TFBASH_FINALIZE_{token}".encode() + _UNIT_SEPARATOR
+        self._pending_finalization = _PendingFinalization(correlation_id, marker)
+        self._state = _ParserState.FINDING_FINALIZATION
+        marker_text = marker[1:-1].decode("ascii")
+        return CommandFrame(
+            correlation_id,
+            f"printf '\\036{marker_text}\\037'\n".encode(),
+        )
+
     def feed(self, data: bytes) -> tuple[DialectEvent, ...]:
         if self._state is _ParserState.CLOSED:
             raise DialectProtocolError("cannot feed a closed Bash protocol")
@@ -255,12 +298,16 @@ class BashProtocol(DialectProtocol):
             _ParserState.CAPTURING,
             _ParserState.FINALIZING,
             _ParserState.FINDING_RECOVERY,
+            _ParserState.AWAITING_FINALIZATION,
+            _ParserState.FINDING_FINALIZATION,
+            _ParserState.FINALIZATION_PROMPT,
         } and self._buffer:
             events.append(DialectEvent(DialectEventKind.OUTPUT, data=bytes(self._buffer)))
         self._buffer.clear()
         self._pending_command = None
         self._pending_result = None
         self._pending_recovery = None
+        self._pending_finalization = None
         self._state = _ParserState.CLOSED
         return tuple(events)
 
@@ -286,6 +333,12 @@ class BashProtocol(DialectProtocol):
             return self._read_result()
         if self._state is _ParserState.FINALIZING:
             return self._read_prompt(events)
+        if self._state is _ParserState.AWAITING_FINALIZATION:
+            return False
+        if self._state is _ParserState.FINDING_FINALIZATION:
+            return self._find_finalization(events)
+        if self._state is _ParserState.FINALIZATION_PROMPT:
+            return self._read_finalization_prompt(events)
         if self._state is _ParserState.FINDING_RECOVERY:
             return self._find_recovery_record(events)
         if self._state is _ParserState.READING_RECOVERY:
@@ -426,9 +479,60 @@ class BashProtocol(DialectProtocol):
                     cwd=result.cwd,
                 )
             )
+            self._state = _ParserState.AWAITING_FINALIZATION
+            return True
         self._pending_command = None
         self._pending_result = None
         self._pending_recovery = None
+        self._state = _ParserState.READY
+        return True
+
+    def _find_finalization(self, events: list[DialectEvent]) -> bool:
+        pending = self._require_pending_finalization()
+        marker_at = self._buffer.find(pending.marker)
+        if marker_at < 0:
+            safe_bytes = len(self._buffer) - len(pending.marker) + 1
+            if safe_bytes > 0:
+                visible = bytes(self._buffer[:safe_bytes])
+                if visible:
+                    events.append(DialectEvent(DialectEventKind.OUTPUT, data=visible))
+                del self._buffer[:safe_bytes]
+            return False
+        if marker_at:
+            events.append(
+                DialectEvent(DialectEventKind.OUTPUT, data=bytes(self._buffer[:marker_at]))
+            )
+        del self._buffer[: marker_at + len(pending.marker)]
+        self._state = _ParserState.FINALIZATION_PROMPT
+        return True
+
+    def _read_finalization_prompt(self, events: list[DialectEvent]) -> bool:
+        pending = self._require_pending_finalization()
+        prompt_at = self._buffer.find(self._prompt)
+        if prompt_at < 0:
+            safe_bytes = len(self._buffer) - len(self._prompt) + 1
+            if safe_bytes > 0:
+                visible = bytes(self._buffer[:safe_bytes])
+                if visible:
+                    events.append(DialectEvent(DialectEventKind.OUTPUT, data=visible))
+                del self._buffer[:safe_bytes]
+            return False
+        if prompt_at:
+            events.append(
+                DialectEvent(DialectEventKind.OUTPUT, data=bytes(self._buffer[:prompt_at]))
+            )
+        del self._buffer[: prompt_at + len(self._prompt)]
+        if self._buffer.startswith(b" "):
+            del self._buffer[:1]
+        events.append(
+            DialectEvent(
+                DialectEventKind.FINALIZED,
+                correlation_id=pending.correlation_id,
+            )
+        )
+        self._pending_command = None
+        self._pending_result = None
+        self._pending_finalization = None
         self._state = _ParserState.READY
         return True
 
@@ -516,6 +620,11 @@ class BashProtocol(DialectProtocol):
         if self._pending_recovery is None:
             raise DialectProtocolError("missing Bash recovery framing state")
         return self._pending_recovery
+
+    def _require_pending_finalization(self) -> _PendingFinalization:
+        if self._pending_finalization is None:
+            raise DialectProtocolError("missing Bash finalization framing state")
+        return self._pending_finalization
 
 
 def _encoded_eval(command: str, decoder: str) -> str:

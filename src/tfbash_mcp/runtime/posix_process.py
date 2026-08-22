@@ -218,6 +218,75 @@ class PosixProcessSupervisor:
                 return True
             return not self._finalize_leader(concrete)
 
+    def cleanup_execution(
+        self,
+        ownership: ProcessOwnership,
+        *,
+        deadline_ms: int,
+    ) -> CleanupResult:
+        """Reap live processes in the Shell session without killing its leader."""
+
+        concrete = self._ownership(ownership)
+        if deadline_ms < 0:
+            raise ProcessControlError("execution cleanup deadline cannot be negative")
+        with concrete._lock:
+            if concrete._finalized:
+                raise ProcessControlError("cannot clean an execution after Shell cleanup")
+            process_id = self._require_attached(concrete)
+            deadline = time.monotonic() + deadline_ms / 1000
+            records = self._snapshot_before_deadline(process_id, deadline)
+            if records is None:
+                return CleanupResult(reaped=False, remaining_managed_processes=1)
+            outstanding = self._execution_records(records, process_id)
+            if not outstanding:
+                return CleanupResult(reaped=True, remaining_managed_processes=0)
+
+            if not self._signal_execution_records(
+                outstanding,
+                concrete._shell_process_group_id,
+                signal.SIGCONT,
+                deadline,
+            ):
+                return self._execution_cleanup_result(outstanding)
+            if not self._signal_execution_records(
+                outstanding,
+                concrete._shell_process_group_id,
+                signal.SIGTERM,
+                deadline,
+            ):
+                return self._execution_cleanup_result(outstanding)
+
+            term_deadline = time.monotonic() + max(
+                0.0,
+                (deadline - time.monotonic()) / 2,
+            )
+            outstanding = self._wait_for_execution(
+                process_id,
+                term_deadline,
+                outstanding,
+            )
+            if outstanding:
+                if not self._signal_execution_records(
+                    outstanding,
+                    concrete._shell_process_group_id,
+                    signal.SIGCONT,
+                    deadline,
+                ):
+                    return self._execution_cleanup_result(outstanding)
+                if not self._signal_execution_records(
+                    outstanding,
+                    concrete._shell_process_group_id,
+                    signal.SIGKILL,
+                    deadline,
+                ):
+                    return self._execution_cleanup_result(outstanding)
+                outstanding = self._wait_for_execution(
+                    process_id,
+                    deadline,
+                    outstanding,
+                )
+            return self._execution_cleanup_result(outstanding)
+
     def cleanup(
         self,
         ownership: ProcessOwnership,
@@ -231,7 +300,7 @@ class PosixProcessSupervisor:
             if concrete._finalized:
                 self._close_terminal(concrete)
                 return CleanupResult(reaped=True, remaining_managed_processes=0)
-            if concrete._process_id is None and concrete._attach_consumed:
+            if concrete._process_id is None:
                 concrete._mark_finalized()
                 self._close_terminal(concrete)
                 return CleanupResult(reaped=True, remaining_managed_processes=0)
@@ -370,6 +439,78 @@ class PosixProcessSupervisor:
             if remaining > 0:
                 time.sleep(min(0.02, remaining))
         return records
+
+    def _wait_for_execution(
+        self,
+        session_id: int,
+        deadline: float,
+        last_records: list[_ProcessRecord],
+    ) -> list[_ProcessRecord]:
+        outstanding = last_records
+        while time.monotonic() < deadline:
+            snapshot = self._snapshot_before_deadline(session_id, deadline)
+            if snapshot is None:
+                return outstanding
+            outstanding = self._execution_records(snapshot, session_id)
+            if not outstanding:
+                return []
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.02, remaining))
+        return outstanding
+
+    @staticmethod
+    def _execution_records(
+        records: list[_ProcessRecord],
+        shell_process_id: int,
+    ) -> list[_ProcessRecord]:
+        return [
+            record
+            for record in records
+            if record.process_id != shell_process_id and not record.is_zombie
+        ]
+
+    @staticmethod
+    def _execution_cleanup_result(records: list[_ProcessRecord]) -> CleanupResult:
+        count = len({record.process_id for record in records})
+        return CleanupResult(
+            reaped=count == 0,
+            remaining_managed_processes=count,
+        )
+
+    @classmethod
+    def _signal_execution_records(
+        cls,
+        records: list[_ProcessRecord],
+        shell_process_group_id: int | None,
+        native_signal: int,
+        deadline: float,
+    ) -> bool:
+        groups = sorted(
+            {
+                record.process_group_id
+                for record in records
+                if record.process_group_id > 0
+                and record.process_group_id != shell_process_group_id
+            }
+        )
+        if not cls._signal_groups(groups, native_signal, deadline):
+            return False
+        grouped = set(groups)
+        for record in records:
+            if record.process_group_id in grouped:
+                continue
+            if time.monotonic() >= deadline:
+                return False
+            try:
+                os.kill(record.process_id, native_signal)
+            except ProcessLookupError:
+                continue
+            except OSError as error:
+                raise ProcessControlError(
+                    "failed to clean up a POSIX execution process"
+                ) from error
+        return True
 
     def _snapshot_before_deadline(
         self,

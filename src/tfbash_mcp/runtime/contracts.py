@@ -47,6 +47,7 @@ class DialectEventKind(str, Enum):
     OUTPUT = "output"
     READY = "ready"
     RECOVERED = "recovered"
+    FINALIZED = "finalized"
     COMMAND_COMPLETE = "command_complete"
 
 
@@ -142,6 +143,15 @@ class DialectEvent:
             if self.exit_code is not None or self.shell_version is not None:
                 raise ValueError("recovered events cannot contain exit_code or shell_version")
             return
+        if self.kind is DialectEventKind.FINALIZED:
+            if self.correlation_id is None:
+                raise ValueError("finalized events require correlation_id")
+            if any(
+                value is not None
+                for value in (self.exit_code, self.cwd, self.shell_version)
+            ):
+                raise ValueError("finalized events contain only correlation_id")
+            return
         if self.shell_version is not None:
             raise ValueError("command completion cannot contain shell_version")
         if self.correlation_id is None or self.exit_code is None:
@@ -211,6 +221,10 @@ class DialectProtocol(Protocol):
 
     def recovery_input(self) -> bytes: ...
 
+    def begin_finalization(self) -> CommandFrame:
+        """Create a correlated probe that flushes deferred runtime notifications."""
+        ...
+
     def feed(self, data: bytes) -> tuple[DialectEvent, ...]: ...
 
     def end_of_stream(self) -> tuple[DialectEvent, ...]: ...
@@ -228,7 +242,12 @@ class ShellDialect(Protocol):
     @property
     def default_executable(self) -> str: ...
 
-    def prepare_session(self, request: ShellStartRequest) -> DialectSessionPlan: ...
+    def prepare_session(
+        self,
+        request: ShellStartRequest,
+        *,
+        deadline_ms: int | None = None,
+    ) -> DialectSessionPlan: ...
 
 
 class PtyTransport(Protocol):
@@ -241,6 +260,8 @@ class PtyTransport(Protocol):
         self,
         request: SpawnRequest,
         ownership: ProcessOwnership,
+        *,
+        deadline_ms: int | None = None,
     ) -> RuntimeSession:
         """Spawn inside a prepared ownership boundary.
 
@@ -289,6 +310,15 @@ class ProcessSupervisor(Protocol):
     ) -> ControlDelivery: ...
 
     def is_alive(self, ownership: ProcessOwnership) -> bool: ...
+
+    def cleanup_execution(
+        self,
+        ownership: ProcessOwnership,
+        *,
+        deadline_ms: int,
+    ) -> CleanupResult:
+        """Reap command descendants while preserving the persistent Shell."""
+        ...
 
     def cleanup(
         self,

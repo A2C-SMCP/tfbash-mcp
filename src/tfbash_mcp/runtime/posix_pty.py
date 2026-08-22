@@ -89,13 +89,18 @@ class PexpectPosixPtyTransport:
         self,
         request: SpawnRequest,
         ownership: ProcessOwnership,
+        *,
+        deadline_ms: int | None = None,
     ) -> RuntimeSession:
         if not isinstance(ownership, PosixSpawnOwnership):
             raise TransportError("POSIX transport requires prepared POSIX ownership")
         self.retry_failed_spawn_cleanup()
         child: Any | None = None
         transport_fd = -1
+        deadline = None if deadline_ms is None else time.monotonic() + deadline_ms / 1000
         try:
+            if deadline_ms is not None and deadline_ms <= 0:
+                raise TransportError("POSIX PTY spawn deadline expired")
             ownership.reserve()
             child = pexpect.spawn(
                 request.executable,
@@ -110,6 +115,8 @@ class PexpectPosixPtyTransport:
                 preexec_fn=ownership.child_setup,
             )
             ownership.attach(int(child.pid), int(child.child_fd))
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TransportError("POSIX PTY spawn deadline expired")
             transport_fd = os.dup(child.child_fd)
             os.set_blocking(transport_fd, False)
             self._release_pexpect_master(child)

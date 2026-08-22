@@ -258,6 +258,42 @@ def test_completion_waits_for_real_prompt_finalizing_gate() -> None:
     assert completed[-1].kind is DialectEventKind.COMMAND_COMPLETE
 
 
+def test_correlated_finalization_preserves_cleanup_output_at_every_split() -> None:
+    for split in range(160):
+        protocol = cast(BashProtocol, _plan().protocol)
+        _ready(protocol)
+        command = protocol.wrap_command("start-background-job")
+        completed = protocol.feed(
+            _command_bytes(protocol, command.correlation_id, output=b"FIRST")
+        )
+        assert completed[-1].kind is DialectEventKind.COMMAND_COMPLETE
+        with pytest.raises(DialectProtocolError, match="not ready"):
+            protocol.wrap_command("too-early")
+
+        finalization = protocol.begin_finalization()
+        token = finalization.correlation_id.removeprefix("finalize_")
+        payload = (
+            b"ONTERM\r\n"
+            + b"\x1eTFBASH_FINALIZE_"
+            + token.encode()
+            + b"\x1fjob-finished\r\n"
+            + protocol._prompt
+            + b" "
+        )
+        events = protocol.feed(payload[:split]) + protocol.feed(payload[split:])
+
+        assert b"".join(
+            event.data for event in events if event.kind is DialectEventKind.OUTPUT
+        ) == b"ONTERM\r\njob-finished\r\n"
+        assert [event for event in events if event.kind is DialectEventKind.FINALIZED] == [
+            DialectEvent(
+                DialectEventKind.FINALIZED,
+                correlation_id=finalization.correlation_id,
+            )
+        ]
+        assert protocol.wrap_command("next-command")
+
+
 def test_large_output_streams_without_growing_control_buffer() -> None:
     protocol = cast(BashProtocol, _plan().protocol)
     _ready(protocol)
@@ -489,7 +525,9 @@ def _wait_for_state(child: Any, protocol: BashProtocol, state_name: str) -> None
 def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Path) -> None:
     subdirectory = tmp_path / "sub"
     subdirectory.mkdir()
-    dialect = BashDialect(token_factory=_token_factory("A" * 32, "B" * 32, "C" * 32))
+    dialect = BashDialect(
+        token_factory=_token_factory("A" * 32, "B" * 32, "C" * 32, "D" * 32)
+    )
     plan = dialect.prepare_session(
         ShellStartRequest(
             "/bin/bash",
@@ -523,6 +561,11 @@ def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Pat
         assert completed.exit_code == 0
         assert completed.cwd == str(subdirectory)
         assert b"host-value/startup-value" in b"".join(event.data for event in events)
+
+        finalization = protocol.begin_finalization()
+        child.send(finalization.input_bytes)
+        _, finalized = _read_until(child, protocol, DialectEventKind.FINALIZED)
+        assert finalized.correlation_id == finalization.correlation_id
 
         second = protocol.wrap_command(
             "python3 << 'PYEOF'\nprint('你好🙂')\nPYEOF\nprintf \'/%s\' \"$KEEP\"\nfalse"

@@ -254,6 +254,14 @@ class CommandShell:
         with self._lock:
             return self._active_execution
 
+    def confirm_ready(self, *, cwd: str) -> None:
+        """Record the runtime-confirmed cwd after the startup handshake."""
+
+        with self._lock:
+            if self._state is not ShellState.READY or self._active_execution is not None:
+                raise InvalidTransition("only an idle ready shell can confirm startup")
+            self._last_known_cwd = cwd
+
     def start_execution(self, execution: Execution) -> None:
         with self._lock:
             if self._state is ShellState.CLOSING:
