@@ -43,6 +43,7 @@ class WaitInterest(str, Enum):
 
 
 class DialectEventKind(str, Enum):
+    BOOTSTRAP_REQUIRED = "bootstrap_required"
     OUTPUT = "output"
     READY = "ready"
     RECOVERED = "recovered"
@@ -117,6 +118,18 @@ class DialectEvent:
             return
         if self.data:
             raise ValueError("control events cannot contain output data")
+        if self.kind is DialectEventKind.BOOTSTRAP_REQUIRED:
+            if any(
+                value is not None
+                for value in (
+                    self.correlation_id,
+                    self.exit_code,
+                    self.cwd,
+                    self.shell_version,
+                )
+            ):
+                raise ValueError("bootstrap events cannot contain result fields")
+            return
         if self.kind is DialectEventKind.READY:
             if self.correlation_id is not None or self.exit_code is not None:
                 raise ValueError("ready events contain only the confirmed cwd")

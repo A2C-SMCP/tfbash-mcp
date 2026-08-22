@@ -47,6 +47,11 @@ from tfbash_mcp.runtime.errors import (
     TransportError,
     UnsupportedShell,
 )
+from tfbash_mcp.runtime.posix_pty import (
+    PexpectPosixPtyTransport,
+    PexpectPosixSession,
+    PosixSpawnOwnership,
+)
 from tfbash_mcp.runtime.profile import (
     ManagedRuntimeSession,
     PosixBashProfile,
@@ -75,7 +80,10 @@ __all__ = [
     "HostConfig",
     "HostProfile",
     "ManagedRuntimeSession",
+    "PexpectPosixPtyTransport",
+    "PexpectPosixSession",
     "PosixBashProfile",
+    "PosixSpawnOwnership",
     "ProcessControlError",
     "ProcessOwnership",
     "ProcessSupervisor",

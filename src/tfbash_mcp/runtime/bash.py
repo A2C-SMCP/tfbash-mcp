@@ -40,6 +40,7 @@ _INTEGER = re.compile(rb"-?[0-9]{1,10}\Z")
 
 
 class _ParserState(Enum):
+    AWAITING_INITIAL_PROMPT = auto()
     STARTING = auto()
     READING_STARTUP = auto()
     READY = auto()
@@ -98,12 +99,17 @@ class BashDialect:
             token_factory=self._token_factory,
             max_control_bytes=self._max_control_bytes,
         )
+        launch_environment = dict(request.environment)
+        launch_environment.update(
+            PS1=protocol._prompt.decode("ascii") + " ",
+            PROMPT_COMMAND="",
+        )
         launch = DialectLaunch(
             spawn=SpawnRequest(
                 executable=request.executable,
                 arguments=("--noprofile", "--norc", "-i"),
                 cwd=request.cwd,
-                environment=request.environment,
+                environment=launch_environment,
             ),
             initial_input=protocol.initial_input(request.startup_command),
         )
@@ -127,7 +133,7 @@ class BashProtocol(DialectProtocol):
         self._ready_prefix = _RECORD_SEPARATOR + f"TFBASH_READY_{session_token}:".encode()
         self._base64_variable = f"__TFBASH_BASE64_{session_token}"
         self._buffer = bytearray()
-        self._state = _ParserState.STARTING
+        self._state = _ParserState.AWAITING_INITIAL_PROMPT
         self._pending_command: _PendingCommand | None = None
         self._pending_result: _PendingResult | None = None
         self._pending_recovery: _PendingRecovery | None = None
@@ -259,6 +265,8 @@ class BashProtocol(DialectProtocol):
         return tuple(events)
 
     def _advance(self, events: list[DialectEvent]) -> bool:
+        if self._state is _ParserState.AWAITING_INITIAL_PROMPT:
+            return self._read_initial_prompt(events)
         if self._state is _ParserState.STARTING:
             return self._find_startup_record()
         if self._state is _ParserState.READING_STARTUP:
@@ -283,6 +291,18 @@ class BashProtocol(DialectProtocol):
         if self._state is _ParserState.READING_RECOVERY:
             return self._read_recovery_record()
         return False
+
+    def _read_initial_prompt(self, events: list[DialectEvent]) -> bool:
+        prompt_at = self._buffer.find(self._prompt)
+        if prompt_at < 0:
+            self._retain_marker_overlap(self._prompt)
+            return False
+        del self._buffer[: prompt_at + len(self._prompt)]
+        if self._buffer.startswith(b" "):
+            del self._buffer[:1]
+        events.append(DialectEvent(DialectEventKind.BOOTSTRAP_REQUIRED))
+        self._state = _ParserState.STARTING
+        return True
 
     def _find_startup_record(self) -> bool:
         marker_at = self._buffer.find(self._ready_prefix)

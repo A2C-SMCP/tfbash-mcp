@@ -78,6 +78,7 @@ def _ready(
     version: str = "5.2.0",
     cwd: str = "/workspace",
 ) -> DialectEvent:
+    _bootstrap(protocol)
     events = protocol.feed(
         _startup_bytes(
             protocol,
@@ -90,6 +91,12 @@ def _ready(
     assert len(events) == 1
     assert events[0].kind is DialectEventKind.READY
     return events[0]
+
+
+def _bootstrap(protocol: BashProtocol) -> None:
+    assert protocol.feed(protocol._prompt + b" ") == (
+        DialectEvent(DialectEventKind.BOOTSTRAP_REQUIRED),
+    )
 
 
 def _command_bytes(
@@ -153,6 +160,7 @@ def test_each_session_has_private_prompt_and_parser_state() -> None:
 
 def test_startup_record_is_incremental_and_reports_version_and_cwd() -> None:
     protocol = cast(BashProtocol, _plan().protocol)
+    _bootstrap(protocol)
     payload = _startup_bytes(protocol, version="5.2.37", cwd="/work/项目")
 
     events = _feed_in_chunks(protocol, payload, tuple(1 for _ in payload[:-1]))
@@ -168,10 +176,12 @@ def test_startup_record_is_incremental_and_reports_version_and_cwd() -> None:
 
 def test_startup_fails_closed_for_non_bash_and_failed_command() -> None:
     unsupported = cast(BashProtocol, _plan().protocol)
+    _bootstrap(unsupported)
     with pytest.raises(UnsupportedShell, match="compatible Bash"):
         unsupported.feed(_startup_bytes(unsupported, probe=1, exit_code=126, version=""))
 
     failed = cast(BashProtocol, _plan().protocol)
+    _bootstrap(failed)
     with pytest.raises(DialectProtocolError, match="exit code 17"):
         failed.feed(_startup_bytes(failed, exit_code=17))
 
@@ -415,15 +425,18 @@ def test_invalid_requests_and_control_records_fail_closed() -> None:
         )
 
     protocol = cast(BashProtocol, _plan().protocol)
+    _bootstrap(protocol)
     malformed = protocol._ready_prefix + b"0:0:not-base64:bad\x1f" + protocol._prompt
     with pytest.raises(DialectProtocolError, match="shell version"):
         protocol.feed(malformed)
 
     oversized = cast(BashProtocol, _plan().protocol)
+    _bootstrap(oversized)
     with pytest.raises(DialectProtocolError, match="byte limit"):
         oversized.feed(oversized._ready_prefix + b"1" * 70_000 + b"\x1f")
 
     oversized_integer = cast(BashProtocol, _plan().protocol)
+    _bootstrap(oversized_integer)
     invalid_integer = (
         oversized_integer._ready_prefix
         + b"0:"
@@ -496,6 +509,7 @@ def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Pat
         timeout=8,
     )
     try:
+        _read_until(child, protocol, DialectEventKind.BOOTSTRAP_REQUIRED)
         child.send(plan.launch.initial_input)
         _, ready = _read_until(child, protocol, DialectEventKind.READY)
         assert ready.cwd == str(tmp_path)
@@ -545,6 +559,7 @@ def test_real_bash_ctrl_c_recovery_returns_prompt_and_allows_next_command(
         timeout=8,
     )
     try:
+        _read_until(child, protocol, DialectEventKind.BOOTSTRAP_REQUIRED)
         child.send(plan.launch.initial_input)
         _read_until(child, protocol, DialectEventKind.READY)
         blocked = protocol.wrap_command("sleep 30")
@@ -576,12 +591,13 @@ def test_real_bash_without_base64_reports_unsupported_shell(tmp_path: Path) -> N
         "/bin/bash",
         list(plan.launch.spawn.arguments),
         cwd=str(tmp_path),
-        env={"PATH": ""},
+        env=dict(plan.launch.spawn.environment),
         encoding=None,
         echo=False,
         timeout=8,
     )
     try:
+        _read_until(child, protocol, DialectEventKind.BOOTSTRAP_REQUIRED)
         child.send(plan.launch.initial_input)
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
