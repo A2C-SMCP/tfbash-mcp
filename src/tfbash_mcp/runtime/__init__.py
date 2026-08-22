@@ -1,5 +1,6 @@
 """Platform-neutral Runtime Ports and process-level composition."""
 
+from tfbash_mcp.runtime.bash import BashDialect, BashProtocol
 from tfbash_mcp.runtime.config import (
     EnvironmentKind,
     EnvironmentSummary,
@@ -55,6 +56,8 @@ from tfbash_mcp.runtime.profile import (
 )
 
 __all__ = [
+    "BashDialect",
+    "BashProtocol",
     "CleanupResult",
     "CleanupTimeout",
     "CommandFrame",

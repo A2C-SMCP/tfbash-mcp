@@ -45,6 +45,7 @@ class WaitInterest(str, Enum):
 class DialectEventKind(str, Enum):
     OUTPUT = "output"
     READY = "ready"
+    RECOVERED = "recovered"
     COMMAND_COMPLETE = "command_complete"
 
 
@@ -99,12 +100,18 @@ class DialectEvent:
     correlation_id: str | None = None
     exit_code: int | None = None
     cwd: str | None = None
+    shell_version: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind is DialectEventKind.OUTPUT:
             if not self.data or any(
                 value is not None
-                for value in (self.correlation_id, self.exit_code, self.cwd)
+                for value in (
+                    self.correlation_id,
+                    self.exit_code,
+                    self.cwd,
+                    self.shell_version,
+                )
             ):
                 raise ValueError("output events contain only non-empty data")
             return
@@ -113,7 +120,17 @@ class DialectEvent:
         if self.kind is DialectEventKind.READY:
             if self.correlation_id is not None or self.exit_code is not None:
                 raise ValueError("ready events contain only the confirmed cwd")
+            if self.cwd is None or self.shell_version is None:
+                raise ValueError("ready events require cwd and shell_version")
             return
+        if self.kind is DialectEventKind.RECOVERED:
+            if self.correlation_id is None or self.cwd is None:
+                raise ValueError("recovered events require correlation_id and cwd")
+            if self.exit_code is not None or self.shell_version is not None:
+                raise ValueError("recovered events cannot contain exit_code or shell_version")
+            return
+        if self.shell_version is not None:
+            raise ValueError("command completion cannot contain shell_version")
         if self.correlation_id is None or self.exit_code is None:
             raise ValueError("command completion requires correlation_id and exit_code")
 
