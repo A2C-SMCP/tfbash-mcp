@@ -12,11 +12,11 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import cast
+from typing import Any, cast
 
+import pexpect  # type: ignore[import-untyped]
 import pytest
 
-import tfbash_mcp.runtime.posix_pty as posix_pty_module
 from tfbash_mcp.runtime import (
     BashDialect,
     BashProtocol,
@@ -38,10 +38,13 @@ class _Ownership:
     process_id: int | None = None
     fail_attach: bool = False
 
+    def reserve(self) -> None:
+        return
+
     def child_setup(self) -> None:
         return
 
-    def attach(self, process_id: int) -> None:
+    def attach(self, process_id: int, _terminal_file_descriptor: int) -> None:
         self.process_id = process_id
         if self.fail_attach:
             raise OSError("attach failed")
@@ -69,10 +72,13 @@ class _SelfCleaningFailedOwnership:
     ownership_id: str
     attempted_process_id: int | None = None
 
+    def reserve(self) -> None:
+        return
+
     def child_setup(self) -> None:
         return
 
-    def attach(self, process_id: int) -> None:
+    def attach(self, process_id: int, _terminal_file_descriptor: int) -> None:
         self.attempted_process_id = process_id
         with suppress(ProcessLookupError):
             os.kill(process_id, signal.SIGKILL)
@@ -415,12 +421,12 @@ def test_failed_spawn_retries_pexpect_master_close_without_leak(
 ) -> None:
     transport = PexpectPosixPtyTransport()
     owner = _Ownership("pexpect-close-retry")
-    spawned: list[object] = []
+    spawned: list[Any] = []
     release_attempts = 0
-    real_spawn = posix_pty_module.pexpect.spawn
+    real_spawn = pexpect.spawn
     real_release = PexpectPosixPtyTransport._release_pexpect_master
 
-    def record_spawn(*args: object, **kwargs: object) -> object:
+    def record_spawn(*args: object, **kwargs: object) -> Any:
         child = real_spawn(*args, **kwargs)
         spawned.append(child)
         return child
@@ -428,14 +434,14 @@ def test_failed_spawn_retries_pexpect_master_close_without_leak(
     def fail_set_blocking(_file_descriptor: int, _blocking: bool) -> None:
         raise OSError(errno.EIO, "injected configuration failure")
 
-    def fail_master_close_once(child: object) -> None:
+    def fail_master_close_once(child: Any) -> None:
         nonlocal release_attempts
         release_attempts += 1
         if release_attempts == 1:
             raise OSError(errno.EIO, "injected pexpect close failure")
         real_release(child)
 
-    monkeypatch.setattr(posix_pty_module.pexpect, "spawn", record_spawn)
+    monkeypatch.setattr(pexpect, "spawn", record_spawn)
     monkeypatch.setattr(os, "set_blocking", fail_set_blocking)
     monkeypatch.setattr(
         PexpectPosixPtyTransport,
@@ -447,7 +453,7 @@ def test_failed_spawn_retries_pexpect_master_close_without_leak(
             transport.spawn(_python_request("import time; time.sleep(30)"), owner)
         assert release_attempts == 2
         assert len(spawned) == 1
-        child = cast(object, spawned[0])
+        child = spawned[0]
         assert child.closed
         assert child.ptyproc.fileobj.closed
         assert transport._pending_pexpect_children == []

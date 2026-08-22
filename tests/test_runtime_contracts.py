@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -308,7 +310,7 @@ def test_runtime_boundary_has_no_platform_or_mcp_imports() -> None:
         "winpty",
     }
     for source in package.glob("*.py"):
-        if source.name == "posix_pty.py":
+        if source.name in {"posix_process.py", "posix_pty.py"}:
             continue
         tree = ast.parse(source.read_text())
         for node in ast.walk(tree):
@@ -317,6 +319,30 @@ def test_runtime_boundary_has_no_platform_or_mcp_imports() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module is not None:
                 imported_roots.add(node.module.partition(".")[0])
     assert imported_roots.isdisjoint(forbidden)
+
+
+def test_shared_runtime_import_does_not_eagerly_load_posix_adapters() -> None:
+    script = """
+import signal
+import sys
+
+for name in ("SIGCONT", "SIGKILL"):
+    if hasattr(signal, name):
+        delattr(signal, name)
+import tfbash_mcp.runtime
+
+assert "tfbash_mcp.runtime.posix_process" not in sys.modules
+assert "tfbash_mcp.runtime.posix_pty" not in sys.modules
+assert tfbash_mcp.runtime.RuntimeName.WINDOWS_PWSH.value == "windows-pwsh"
+"""
+    completed = subprocess.run(
+        (sys.executable, "-c", script),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_ports_do_not_accept_host_config_or_expose_native_identity_names() -> None:

@@ -33,13 +33,19 @@ from tfbash_mcp.runtime.errors import TransportClosed, TransportError
 class PosixSpawnOwnership(ProcessOwnership, Protocol):
     """POSIX-only hook implemented by the process supervisor in #7."""
 
+    def reserve(self) -> None:
+        """Atomically consume this ownership before the transport forks."""
+        ...
+
     def child_setup(self) -> None:
         """Establish child-side ownership before exec; must only use async-safe OS calls."""
         ...
 
-    def attach(self, process_id: int) -> None:
+    def attach(self, process_id: int, terminal_file_descriptor: int) -> None:
         """Record the exec'd leader before any later transport operation.
 
+        ``terminal_file_descriptor`` is borrowed for this call only; an owner
+        that needs foreground-group observation must duplicate it before return.
         Before returning or raising, this method must either make the process
         reachable by supervisor cleanup or terminate and reap it itself.
         """
@@ -90,6 +96,7 @@ class PexpectPosixPtyTransport:
         child: Any | None = None
         transport_fd = -1
         try:
+            ownership.reserve()
             child = pexpect.spawn(
                 request.executable,
                 list(request.arguments),
@@ -102,7 +109,7 @@ class PexpectPosixPtyTransport:
                 use_poll=True,
                 preexec_fn=ownership.child_setup,
             )
-            ownership.attach(int(child.pid))
+            ownership.attach(int(child.pid), int(child.child_fd))
             transport_fd = os.dup(child.child_fd)
             os.set_blocking(transport_fd, False)
             self._release_pexpect_master(child)

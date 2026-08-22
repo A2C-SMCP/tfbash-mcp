@@ -1,5 +1,8 @@
 """Platform-neutral Runtime Ports and process-level composition."""
 
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
 from tfbash_mcp.runtime.bash import BashDialect, BashProtocol
 from tfbash_mcp.runtime.config import (
     EnvironmentKind,
@@ -47,11 +50,6 @@ from tfbash_mcp.runtime.errors import (
     TransportError,
     UnsupportedShell,
 )
-from tfbash_mcp.runtime.posix_pty import (
-    PexpectPosixPtyTransport,
-    PexpectPosixSession,
-    PosixSpawnOwnership,
-)
 from tfbash_mcp.runtime.profile import (
     ManagedRuntimeSession,
     PosixBashProfile,
@@ -59,6 +57,34 @@ from tfbash_mcp.runtime.profile import (
     RuntimeProfile,
     WindowsPwshProfile,
 )
+
+if TYPE_CHECKING:
+    from tfbash_mcp.runtime.posix_process import (
+        PosixProcessOwnership,
+        PosixProcessSupervisor,
+    )
+    from tfbash_mcp.runtime.posix_pty import (
+        PexpectPosixPtyTransport,
+        PexpectPosixSession,
+        PosixSpawnOwnership,
+    )
+
+_LAZY_POSIX_EXPORTS = {
+    "PexpectPosixPtyTransport": "tfbash_mcp.runtime.posix_pty",
+    "PexpectPosixSession": "tfbash_mcp.runtime.posix_pty",
+    "PosixSpawnOwnership": "tfbash_mcp.runtime.posix_pty",
+    "PosixProcessOwnership": "tfbash_mcp.runtime.posix_process",
+    "PosixProcessSupervisor": "tfbash_mcp.runtime.posix_process",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _LAZY_POSIX_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "BashDialect",
@@ -83,6 +109,8 @@ __all__ = [
     "PexpectPosixPtyTransport",
     "PexpectPosixSession",
     "PosixBashProfile",
+    "PosixProcessOwnership",
+    "PosixProcessSupervisor",
     "PosixSpawnOwnership",
     "ProcessControlError",
     "ProcessOwnership",
