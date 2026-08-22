@@ -209,6 +209,15 @@ V1 只暴露一个 Shell 资源模型，共七个工具：
 - `env` 省略时不增加覆盖项；提供时以 key 覆盖 Server 进程继承的环境。最多 256 项，key 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，每个 UTF-8 value 不超过 32768 字节；Windows Profile 按不区分大小写的环境变量语义拒绝 `PATH`/`Path` 这类重复 key；
 - `yield_ms`、`timeout_ms`、`wait_ms` 和 `duration_ms` 使用单调时钟；只有 `created_at_ms` 是 Unix epoch wall-clock timestamp。
 
+协议 schema 使用 JSON Schema Draft 2020-12，并要求识别
+`https://github.com/A2C-SMCP/tfbash-mcp/schema/v1` vocabulary。该 vocabulary 的
+`x-validUtf8`、`x-utf8-maxBytes`、`x-decoded-maxBytes`、`x-nativeAbsolutePath`、
+`x-caseInsensitiveUniqueKeys` 与 `x-fieldLessThanOrEqual` 分别断言 UTF-8/解码后字节上限、
+平台原生绝对路径、Windows object key 大小写不敏感唯一性和字段间数值顺序；该 vocabulary
+还把 `integer` 收紧为不接受浮点数的 JSON/Python integer。它们不是可忽略的 annotation。标准 JSON
+Schema vocabulary 无法等价表达这些条件，协议消费者必须使用公开的
+`validate_schema_instance`，服务端则继续通过对应 DTO validator 执行同一约束。
+
 ### 5.2 `shell_open` 与 Shell 管理
 
 `shell_open` 创建持久 Command Shell，输入初始 cwd、环境、Shell 程序和可选启动命令：
