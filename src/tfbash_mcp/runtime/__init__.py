@@ -5,13 +5,19 @@ from typing import TYPE_CHECKING, Any
 
 from tfbash_mcp.runtime.bash import BashDialect, BashProtocol
 from tfbash_mcp.runtime.config import (
+    STARTUP_COMMAND_UNSET,
+    AgentContext,
+    AgentHostContext,
+    AgentRuntimeContext,
     EnvironmentKind,
     EnvironmentSummary,
     HostConfig,
     HostProfile,
+    NativePlatform,
     RuntimeBuilders,
     RuntimeComposition,
     RuntimeSelection,
+    ShellOpenOverrides,
     compose_runtime,
     create_host_config,
     resolve_runtime,
@@ -87,6 +93,10 @@ def __getattr__(name: str) -> Any:
     return value
 
 __all__ = [
+    "STARTUP_COMMAND_UNSET",
+    "AgentContext",
+    "AgentHostContext",
+    "AgentRuntimeContext",
     "BashDialect",
     "BashProtocol",
     "CleanupResult",
@@ -106,6 +116,7 @@ __all__ = [
     "HostConfig",
     "HostProfile",
     "ManagedRuntimeSession",
+    "NativePlatform",
     "PexpectPosixPtyTransport",
     "PexpectPosixSession",
     "PosixBashProfile",
@@ -127,6 +138,7 @@ __all__ = [
     "RuntimeSelection",
     "RuntimeSession",
     "ShellDialect",
+    "ShellOpenOverrides",
     "ShellStartRequest",
     "SpawnRequest",
     "TransportClosed",
