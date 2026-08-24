@@ -75,6 +75,12 @@ if TYPE_CHECKING:
         PexpectPosixSession,
         PosixSpawnOwnership,
     )
+    from tfbash_mcp.runtime.windows_conpty import (
+        ConPtyLike,
+        ConPtySession,
+        ConPtyTransport,
+        WindowsSpawnOwnership,
+    )
 
 _LAZY_POSIX_EXPORTS = {
     "PexpectPosixPtyTransport": "tfbash_mcp.runtime.posix_pty",
@@ -84,9 +90,16 @@ _LAZY_POSIX_EXPORTS = {
     "PosixProcessSupervisor": "tfbash_mcp.runtime.posix_process",
 }
 
+_LAZY_WINDOWS_EXPORTS = {
+    "ConPtyLike": "tfbash_mcp.runtime.windows_conpty",
+    "ConPtySession": "tfbash_mcp.runtime.windows_conpty",
+    "ConPtyTransport": "tfbash_mcp.runtime.windows_conpty",
+    "WindowsSpawnOwnership": "tfbash_mcp.runtime.windows_conpty",
+}
+
 
 def __getattr__(name: str) -> Any:
-    module_name = _LAZY_POSIX_EXPORTS.get(name)
+    module_name = (_LAZY_POSIX_EXPORTS | _LAZY_WINDOWS_EXPORTS).get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(import_module(module_name), name)
@@ -104,6 +117,9 @@ __all__ = [
     "CleanupResult",
     "CleanupTimeout",
     "CommandFrame",
+    "ConPtyLike",
+    "ConPtySession",
+    "ConPtyTransport",
     "ControlDelivery",
     "ControlIntent",
     "DialectEvent",
@@ -152,6 +168,7 @@ __all__ = [
     "UnsupportedShell",
     "WaitInterest",
     "WindowsPwshProfile",
+    "WindowsSpawnOwnership",
     "compose_runtime",
     "create_host_config",
     "resolve_runtime",

@@ -198,6 +198,8 @@ class _Transport:
     spawn_started: Event = field(default_factory=Event)
     spawn_release: Event = field(default_factory=Event)
     ready_hook: Callable[[], None] | None = None
+    write_blocked: Event = field(default_factory=Event)
+    close_called: Event = field(default_factory=Event)
 
     def spawn(
         self,
@@ -270,6 +272,9 @@ class _Transport:
                 )
             elif command == "flood":
                 concrete.continuous_correlation_id = correlation_id
+            elif command == "blocked-write":
+                self.write_blocked.set()
+                return TransportWrite(0, would_block=True)
             elif command not in {"hang", "slow-wrap"}:
                 raise AssertionError(f"unknown fake command: {command}")
         elif payload.startswith(b"recover:"):
@@ -301,6 +306,7 @@ class _Transport:
         concrete = self._session(session)
         concrete.closed = True
         concrete.push()
+        self.close_called.set()
 
     @staticmethod
     def _complete_later(session: _Session, correlation_id: str, delay: float) -> None:
@@ -490,6 +496,47 @@ def test_yield_busy_condition_wakeup_and_waiter_quota() -> None:
         assert final.eof is True
     finally:
         manager.shutdown()
+
+
+def test_shutdown_preempts_active_write_backpressure_within_one_io_slice() -> None:
+    profile = _fake_profile(RuntimeName.WINDOWS_PWSH)
+    transport = profile.transport
+    supervisor = profile.supervisor
+    assert isinstance(transport, _Transport)
+    assert isinstance(supervisor, _Supervisor)
+    manager = CommandShellManager(
+        profile=profile,
+        config=ManagerConfig(worker=WorkerConfig(io_wait_slice_ms=20)),
+    )
+    shell = manager.open_shell(_request(profile.dialect.default_executable))
+    running = manager.exec(
+        shell.shell_id,
+        "blocked-write",
+        yield_ms=0,
+        timeout_ms=60_000,
+        max_output_bytes=4096,
+    )
+    assert running.status is ExecutionState.RUNNING
+    assert transport.write_blocked.wait(1)
+
+    errors: list[Exception] = []
+    started = time.monotonic()
+
+    def shutdown() -> None:
+        try:
+            manager.shutdown()
+        except Exception as error:
+            errors.append(error)
+
+    shutdown_thread = Thread(target=shutdown)
+    shutdown_thread.start()
+    shutdown_thread.join(timeout=1)
+
+    assert not shutdown_thread.is_alive()
+    assert time.monotonic() - started < 0.5
+    assert errors == []
+    assert transport.close_called.is_set()
+    assert supervisor.cleanup_calls == 1
 
 
 def test_different_shells_execute_in_parallel_and_timeout_shell_recovers() -> None:

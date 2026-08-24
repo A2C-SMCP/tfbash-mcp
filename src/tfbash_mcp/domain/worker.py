@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from queue import Queue
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 from tfbash_mcp.domain.models import Clock, CommandShell, Execution, ExecutionState, ShellState
 from tfbash_mcp.domain.registry import ShellRegistry
@@ -73,6 +73,10 @@ class _DeadlineExpired(Exception):
     pass
 
 
+class _StopRequested(Exception):
+    pass
+
+
 class ShellWorker:
     """Serialize all operations for one persistent command Shell."""
 
@@ -100,6 +104,7 @@ class ShellWorker:
         )
         self._queue: Queue[_RunCommand | _Stop] = Queue()
         self._lifecycle_lock = Lock()
+        self._stop_event = Event()
         self._stop_requested = False
         self._stop_error: RuntimeBoundaryError | None = None
         self._cleanup_pending = True
@@ -129,6 +134,7 @@ class ShellWorker:
         with self._lifecycle_lock:
             if not self._stop_requested:
                 self._stop_requested = True
+                self._stop_event.set()
                 if self._thread is not None:
                     self._queue.put(_STOP)
             thread = self._thread
@@ -145,6 +151,15 @@ class ShellWorker:
                     return
                 try:
                     self._execute(work)
+                except _StopRequested:
+                    try:
+                        self._finish_shell_error(work.execution)
+                    except Exception as error:
+                        self._stop_error = RuntimeBoundaryError(
+                            "worker could not seal an execution during shutdown"
+                        )
+                        self._stop_error.__cause__ = error
+                    return
                 except Exception:
                     try:
                         self._finish_shell_error(work.execution)
@@ -265,6 +280,7 @@ class ShellWorker:
         self,
         deadline_ms: int,
     ) -> tuple[tuple[DialectEvent, ...], bool, bytes]:
+        self._raise_if_stopping()
         remaining_ms = max(0, deadline_ms - self._clock.monotonic_ms())
         timeout_ms = min(self._config.io_wait_slice_ms, remaining_ms)
         self._profile.transport.wait(
@@ -272,6 +288,7 @@ class ShellWorker:
             frozenset({WaitInterest.READABLE, WaitInterest.PROCESS_EXIT}),
             timeout_ms,
         )
+        self._raise_if_stopping()
         events: list[DialectEvent] = []
         unclaimed = bytearray()
         for _ in range(self._config.max_reads_per_cycle):
@@ -297,6 +314,7 @@ class ShellWorker:
         cursor = 0
         view = memoryview(payload)
         while cursor < len(payload):
+            self._raise_if_stopping()
             if self._clock.monotonic_ms() >= deadline_ms:
                 raise _DeadlineExpired
             result = self._profile.transport.write(self._managed.session, view[cursor:])
@@ -312,6 +330,11 @@ class ShellWorker:
                     frozenset({WaitInterest.WRITABLE}),
                     min(self._config.io_wait_slice_ms, remaining_ms),
                 )
+                self._raise_if_stopping()
+
+    def _raise_if_stopping(self) -> None:
+        if self._stop_event.is_set():
+            raise _StopRequested
 
     def _finalize_execution(
         self,
