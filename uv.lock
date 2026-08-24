@@ -831,7 +831,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
-    { name = "pexpect" },
 ]
 
 [package.dev-dependencies]
@@ -841,12 +840,12 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+windows-lab = [
+    { name = "pexpect" },
+]
 
 [package.metadata]
-requires-dist = [
-    { name = "mcp", specifier = ">=1.29.0,<2.0.0" },
-    { name = "pexpect", specifier = ">=4.9.0,<5.0.0" },
-]
+requires-dist = [{ name = "mcp", specifier = ">=1.29.0,<2.0.0" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -855,6 +854,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=6.2.1,<7.0.0" },
     { name = "ruff", specifier = ">=0.12.9,<0.13.0" },
 ]
+windows-lab = [{ name = "pexpect", specifier = ">=4.9.0,<5.0.0" }]
 
 [[package]]
 name = "tomli"

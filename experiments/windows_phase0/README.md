@@ -1,5 +1,8 @@
 # Windows V1 Phase 0 experiment
 
+For reusable Mac-to-Windows provisioning, SSH execution, artifact collection,
+and local verification, see [`WINDOWS_LAB.md`](WINDOWS_LAB.md).
+
 This directory contains the disposable experiment runner for issue #12. It is
 not production runtime code. The experiment compares two ownership strategies
 on the same native ConPTY transport:
