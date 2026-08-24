@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 from tfbash_mcp.runtime import (
+    CancellationSignal,
     CleanupResult,
     ConPtySession,
     ConPtyTransport,
@@ -34,22 +35,47 @@ class _Ownership:
     def __init__(self, ownership_id: str = "owner-1") -> None:
         self._ownership_id = ownership_id
         self.reserve_calls = 0
+        self.abort_calls = 0
         self.attached: list[int] = []
+        self.attached_handles: list[object | None] = []
+        self.releases: list[bool] = []
         self.attach_error: Exception | None = None
+        self.attach_hook: Callable[[], None] | None = None
 
     @property
     def ownership_id(self) -> str:
         return self._ownership_id
 
-    def reserve(self) -> None:
+    def reserve_spawn(self, request: SpawnRequest) -> SpawnRequest:
         self.reserve_calls += 1
         if self.reserve_calls > 1:
             raise RuntimeError("ownership reused")
+        return request
 
-    def attach(self, process_id: int) -> None:
+    def abort_unspawned(self) -> None:
+        self.abort_calls += 1
+
+    def attach(
+        self,
+        process_id: int,
+        *,
+        native_handle: object | None = None,
+        release: bool = True,
+        deadline: float | None = None,
+        cancel_signal: CancellationSignal | None = None,
+    ) -> bool:
         self.attached.append(process_id)
+        self.attached_handles.append(native_handle)
+        self.releases.append(release)
+        if self.attach_hook is not None:
+            self.attach_hook()
         if self.attach_error is not None:
             raise self.attach_error
+        return bool(
+            release
+            and (cancel_signal is None or not cancel_signal.is_set())
+            and (deadline is None or time.monotonic() < deadline)
+        )
 
 
 class _WrongOwnership:
@@ -98,9 +124,20 @@ class _Supervisor:
         return CleanupResult(reaped=True, remaining_managed_processes=0)
 
 
+class _ControlOwnership(_Ownership):
+    def __init__(self) -> None:
+        super().__init__("control-owner")
+        self.interrupt: Callable[[int | None], bool] | None = None
+
+    def bind_interrupt(self, sender: Callable[[int | None], bool]) -> None:
+        assert self.interrupt is None
+        self.interrupt = sender
+
+
 class _FakePty:
     def __init__(self, *, pid: int = 4321) -> None:
         self.pid: int | None = pid
+        self.fd: int | None = 9876
         self.spawn_result = True
         self.spawn_error: Exception | None = None
         self.spawn_calls: list[tuple[str, str | None, str | None, str | None]] = []
@@ -334,6 +371,8 @@ def test_spawn_binds_owner_and_passes_exact_windows_launch_values() -> None:
     assert dimensions == [(132, 51)]
     assert owner.reserve_calls == 1
     assert owner.attached == [4321]
+    assert owner.attached_handles == [9876]
+    assert owner.releases == [True]
     assert fake.spawn_calls == [
         (
             '"C:\\Program Files\\PowerShell\\7\\pwsh.exe"',
@@ -386,6 +425,36 @@ def test_spawn_rejects_wrong_owner_and_cancels_after_attachment_failure() -> Non
     assert fake.cancel_calls == 1
 
 
+def test_cancel_flipped_inside_attachment_prevents_successful_spawn() -> None:
+    fake = _FakePty()
+    transport = ConPtyTransport(pty_factory=lambda _columns, _rows: fake)
+    owner = _Ownership()
+    cancelled = threading.Event()
+    owner.attach_hook = cancelled.set
+
+    with pytest.raises(TransportError, match="cancelled"):
+        transport.spawn(_request(), owner, cancel_signal=cancelled)
+
+    assert owner.releases == [True]
+    assert fake.cancel_calls == 1
+
+
+def test_factory_failure_aborts_only_the_unattempted_spawn_reservation() -> None:
+    owner = _Ownership()
+
+    def fail_factory(_columns: int, _rows: int) -> _FakePty:
+        raise OSError("factory failed")
+
+    transport = ConPtyTransport(pty_factory=fail_factory)
+
+    with pytest.raises(TransportError, match="failed to spawn ConPTY"):
+        transport.spawn(_request(), owner)
+
+    assert owner.reserve_calls == 1
+    assert owner.abort_calls == 1
+    assert owner.attached == []
+
+
 @pytest.mark.parametrize("raises", [False, True])
 def test_failed_spawn_attaches_any_exposed_process_before_rollback(raises: bool) -> None:
     fake = _FakePty()
@@ -399,6 +468,7 @@ def test_failed_spawn_attaches_any_exposed_process_before_rollback(raises: bool)
         transport.spawn(_request(), owner)
 
     assert owner.attached == [4321]
+    assert owner.releases == [False]
     assert fake.cancel_calls == 1
 
 
@@ -415,6 +485,19 @@ def test_incremental_utf8_write_and_zero_native_return_are_successful() -> None:
     assert transport.wait(session, frozenset({WaitInterest.WRITABLE}), 0) == frozenset(
         {WaitInterest.WRITABLE}
     )
+    transport.close(session)
+
+
+def test_bound_interrupt_uses_priority_writer_and_reports_native_completion() -> None:
+    fake = _FakePty()
+    transport = ConPtyTransport(pty_factory=lambda _columns, _rows: fake)
+    owner = _ControlOwnership()
+    session = cast(ConPtySession, transport.spawn(_request(), owner, deadline_ms=1000))
+
+    assert owner.interrupt is not None
+    assert owner.interrupt(1000)
+    _wait_until(lambda: fake.writes == ["\x03"])
+
     transport.close(session)
 
 

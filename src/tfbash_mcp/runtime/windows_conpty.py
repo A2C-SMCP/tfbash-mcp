@@ -44,11 +44,23 @@ _NATIVE_WRITE_CHUNK_BYTES = 4096
 class WindowsSpawnOwnership(ProcessOwnership, Protocol):
     """Windows-only hooks implemented by the process supervisor in #15."""
 
-    def reserve(self) -> None:
-        """Atomically consume this ownership before process creation."""
+    def reserve_spawn(self, request: SpawnRequest) -> SpawnRequest:
+        """Consume this ownership and return its fail-closed launch request."""
         ...
 
-    def attach(self, process_id: int) -> None:
+    def abort_unspawned(self) -> None:
+        """Cancel a reservation only when no native spawn call was attempted."""
+        ...
+
+    def attach(
+        self,
+        process_id: int,
+        *,
+        native_handle: object | None = None,
+        release: bool = True,
+        deadline: float | None = None,
+        cancel_signal: CancellationSignal | None = None,
+    ) -> bool:
         """Record the process before any later transport operation.
 
         Before returning or raising, this method must either make the process
@@ -57,10 +69,18 @@ class WindowsSpawnOwnership(ProcessOwnership, Protocol):
         ...
 
 
+@runtime_checkable
+class WindowsControlOwnership(WindowsSpawnOwnership, Protocol):
+    """Optional #15 hook binding semantic interrupt to the sole writer thread."""
+
+    def bind_interrupt(self, sender: Callable[[int | None], bool]) -> None: ...
+
+
 class ConPtyLike(Protocol):
     """The pywinpty surface used by the production adapter."""
 
     pid: int | None
+    fd: int | None
 
     def spawn(
         self,
@@ -102,6 +122,14 @@ class _ResizeItem:
     started: bool = False
 
 
+@dataclass(slots=True)
+class _ControlItem:
+    text: str
+    completed: Event
+    error: Exception | None = None
+    started: bool = False
+
+
 class ConPtySession(RuntimeSession):
     """Opaque ConPTY session with bounded buffers and private I/O threads."""
 
@@ -124,7 +152,7 @@ class ConPtySession(RuntimeSession):
         self._read_guard = Lock()
         self._read_buffer = bytearray()
         self._write_queue: deque[_WriteItem] = deque()
-        self._priority_writes: deque[_WriteItem] = deque()
+        self._priority_writes: deque[_WriteItem | _ControlItem] = deque()
         self._resize_queue: deque[_ResizeItem] = deque()
         self._write_buffered_bytes = 0
         self._priority_write_buffered_bytes = 0
@@ -193,12 +221,17 @@ class ConPtyTransport:
             raise TransportError("ConPTY spawn was cancelled")
         deadline = None if deadline_ms is None else time.monotonic() + deadline_ms / 1000
         pty: ConPtyLike | None = None
+        reserved = False
+        spawn_attempted = False
         try:
-            ownership.reserve()
+            request = ownership.reserve_spawn(request)
+            reserved = True
+            _validate_spawn_request(request)
             pty = self._pty_factory(self._columns, self._rows)
             command_line = subprocess.list2cmdline(request.arguments) if request.arguments else None
             application_name = subprocess.list2cmdline((request.executable,))
             try:
+                spawn_attempted = True
                 spawned = pty.spawn(
                     application_name,
                     cmdline=command_line,
@@ -208,19 +241,37 @@ class ConPtyTransport:
             except Exception as spawn_error:
                 process_id = _valid_process_id(pty.pid)
                 if process_id is not None:
-                    ownership.attach(process_id)
+                    ownership.attach(
+                        process_id,
+                        native_handle=_valid_native_handle(pty.fd),
+                        release=False,
+                    )
                 raise TransportError("pywinpty raised while spawning the process") from spawn_error
             process_id = _valid_process_id(pty.pid)
+            cancelled = cancel_signal is not None and cancel_signal.is_set()
+            expired = deadline is not None and time.monotonic() >= deadline
+            release = bool(spawned and not cancelled and not expired)
+            released = False
             if process_id is not None:
-                ownership.attach(process_id)
-            if cancel_signal is not None and cancel_signal.is_set():
+                released = ownership.attach(
+                    process_id,
+                    native_handle=_valid_native_handle(pty.fd),
+                    release=release,
+                    deadline=deadline,
+                    cancel_signal=cancel_signal,
+                )
+            cancelled = cancel_signal is not None and cancel_signal.is_set()
+            expired = deadline is not None and time.monotonic() >= deadline
+            if cancelled:
                 raise TransportError("ConPTY spawn was cancelled")
             if not spawned:
                 raise TransportError("pywinpty did not spawn the requested process")
             if process_id is None:
                 raise TransportError("ConPTY did not expose a valid process id")
-            if deadline is not None and time.monotonic() >= deadline:
+            if expired:
                 raise TransportError("ConPTY spawn deadline expired")
+            if not released:
+                raise TransportError("ConPTY spawn was not released by its ownership")
             session = ConPtySession(
                 session_id=f"windows_{ownership.ownership_id}",
                 pty=pty,
@@ -228,9 +279,23 @@ class ConPtyTransport:
                 max_read_buffer_bytes=self._max_read_buffer_bytes,
                 max_write_buffer_bytes=self._max_write_buffer_bytes,
             )
+            if isinstance(ownership, WindowsControlOwnership):
+                ownership.bind_interrupt(
+                    lambda deadline_ms: self._send_interrupt(
+                        session,
+                        deadline_ms=deadline_ms,
+                    )
+                )
             self._start_threads(session)
             return session
         except Exception as error:
+            if reserved and not spawn_attempted:
+                try:
+                    ownership.abort_unspawned()
+                except Exception as cleanup_error:
+                    raise TransportError(
+                        "failed to cancel an unstarted ConPTY spawn"
+                    ) from cleanup_error
             if pty is not None:
                 try:
                     pty.cancel_io()
@@ -382,6 +447,10 @@ class ConPtyTransport:
                     return
                 concrete._closing = True
                 concrete._write_queue.clear()
+                for priority in concrete._priority_writes:
+                    if isinstance(priority, _ControlItem):
+                        priority.error = TransportClosed("ConPTY closed before control delivery")
+                        priority.completed.set()
                 concrete._priority_writes.clear()
                 concrete._write_buffered_bytes = 0
                 concrete._priority_write_buffered_bytes = 0
@@ -419,6 +488,47 @@ class ConPtyTransport:
                 concrete._closed = True
                 concrete._pty = None
                 concrete._condition.notify_all()
+
+    def _send_interrupt(
+        self,
+        session: ConPtySession,
+        *,
+        deadline_ms: int | None,
+    ) -> bool:
+        item = _ControlItem("\x03", Event())
+        with session._condition:
+            self._require_open_locked(session)
+            self._raise_io_failure_locked(session)
+            byte_count = len(item.text.encode("utf-8"))
+            if (
+                session._priority_write_buffered_bytes + byte_count
+                > session._max_write_buffer_bytes + 3
+            ):
+                return False
+            session._priority_writes.appendleft(item)
+            session._priority_write_buffered_bytes += byte_count
+            session._condition.notify_all()
+        wait_ms = (
+            self._close_timeout_ms
+            if deadline_ms is None
+            else min(self._close_timeout_ms, max(0, deadline_ms))
+        )
+        if not item.completed.wait(wait_ms / 1000):
+            with session._condition:
+                if not item.completed.is_set() and not item.started:
+                    session._priority_writes.remove(item)
+                    session._priority_write_buffered_bytes -= byte_count
+                    return False
+                if not item.completed.is_set():
+                    failure = TransportError(
+                        "ConPTY interrupt outcome is indeterminate after its deadline"
+                    )
+                    session._writer_error = failure
+                    session._condition.notify_all()
+                    raise failure
+        if item.error is not None:
+            raise TransportError("failed to deliver ConPTY interrupt") from item.error
+        return True
 
     def _start_threads(self, session: ConPtySession) -> None:
         writer = Thread(
@@ -484,7 +594,7 @@ class ConPtyTransport:
         pty = self._require_pty(session)
         try:
             while True:
-                item: _WriteItem | _ResizeItem
+                item: _WriteItem | _ControlItem | _ResizeItem
                 with session._condition:
                     while not (
                         session._closing
@@ -498,6 +608,8 @@ class ConPtyTransport:
                         return
                     if session._priority_writes:
                         item = session._priority_writes.popleft()
+                        if isinstance(item, _ControlItem):
+                            item.started = True
                     elif session._resize_queue:
                         item = session._resize_queue.popleft()
                         item.started = True
@@ -522,10 +634,20 @@ class ConPtyTransport:
                 try:
                     pty.write(item.text)
                     succeeded = True
+                except Exception as error:
+                    if isinstance(item, _ControlItem):
+                        item.error = error
+                    raise
                 finally:
                     with session._condition:
                         session._native_write_active = False
-                        if item.accepted_bytes and succeeded and not session._closing:
+                        if isinstance(item, _ControlItem):
+                            if succeeded and not session._closing:
+                                session._priority_write_buffered_bytes -= len(
+                                    item.text.encode("utf-8")
+                                )
+                            item.completed.set()
+                        elif item.accepted_bytes and succeeded and not session._closing:
                             # The outer exception handler seals the session if the
                             # native call failed, so capacity is only released when
                             # this write returned normally.
@@ -541,6 +663,10 @@ class ConPtyTransport:
                         resize.error = error
                         resize.completed.set()
                     session._resize_queue.clear()
+                    for priority in session._priority_writes:
+                        if isinstance(priority, _ControlItem):
+                            priority.error = error
+                            priority.completed.set()
                     session._condition.notify_all()
         finally:
             with session._condition:
@@ -669,6 +795,13 @@ def _valid_process_id(value: int | None) -> int | None:
         return None
     process_id = int(value)
     return process_id if process_id > 0 else None
+
+
+def _valid_native_handle(value: int | None) -> int | None:
+    if value is None:
+        return None
+    handle = int(value)
+    return handle if handle > 0 else None
 
 
 def _split_utf8_chunks(text: str) -> tuple[tuple[str, int], ...]:

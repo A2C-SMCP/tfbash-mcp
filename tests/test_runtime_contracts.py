@@ -458,7 +458,14 @@ def test_runtime_boundary_has_no_platform_or_mcp_imports() -> None:
         "winpty",
     }
     for source in package.glob("*.py"):
-        if source.name in {"posix_process.py", "posix_pty.py", "windows_conpty.py"}:
+        if source.name in {
+            "posix_process.py",
+            "posix_pty.py",
+            "windows_conpty.py",
+            "windows_bootstrap.py",
+            "windows_process.py",
+            "windows_win32.py",
+        }:
             continue
         tree = ast.parse(source.read_text())
         for node in ast.walk(tree):
@@ -482,6 +489,8 @@ import tfbash_mcp.runtime
 assert "tfbash_mcp.runtime.posix_process" not in sys.modules
 assert "tfbash_mcp.runtime.posix_pty" not in sys.modules
 assert "tfbash_mcp.runtime.windows_conpty" not in sys.modules
+assert "tfbash_mcp.runtime.windows_process" not in sys.modules
+assert "tfbash_mcp.runtime.windows_win32" not in sys.modules
 assert "winpty" not in sys.modules
 assert tfbash_mcp.runtime.RuntimeName.WINDOWS_PWSH.value == "windows-pwsh"
 """

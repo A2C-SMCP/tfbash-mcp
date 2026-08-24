@@ -82,6 +82,13 @@ if TYPE_CHECKING:
         ConPtyTransport,
         WindowsSpawnOwnership,
     )
+    from tfbash_mcp.runtime.windows_process import (
+        WindowsProcessApi,
+        WindowsProcessHandle,
+        WindowsProcessIdentity,
+        WindowsProcessOwnership,
+        WindowsProcessSupervisor,
+    )
 
 _LAZY_POSIX_EXPORTS = {
     "PexpectPosixPtyTransport": "tfbash_mcp.runtime.posix_pty",
@@ -96,6 +103,11 @@ _LAZY_WINDOWS_EXPORTS = {
     "ConPtySession": "tfbash_mcp.runtime.windows_conpty",
     "ConPtyTransport": "tfbash_mcp.runtime.windows_conpty",
     "WindowsSpawnOwnership": "tfbash_mcp.runtime.windows_conpty",
+    "WindowsProcessApi": "tfbash_mcp.runtime.windows_process",
+    "WindowsProcessHandle": "tfbash_mcp.runtime.windows_process",
+    "WindowsProcessIdentity": "tfbash_mcp.runtime.windows_process",
+    "WindowsProcessOwnership": "tfbash_mcp.runtime.windows_process",
+    "WindowsProcessSupervisor": "tfbash_mcp.runtime.windows_process",
 }
 
 
@@ -169,6 +181,11 @@ __all__ = [
     "TransportWrite",
     "UnsupportedShell",
     "WaitInterest",
+    "WindowsProcessApi",
+    "WindowsProcessHandle",
+    "WindowsProcessIdentity",
+    "WindowsProcessOwnership",
+    "WindowsProcessSupervisor",
     "WindowsPwshProfile",
     "WindowsSpawnOwnership",
     "compose_runtime",
