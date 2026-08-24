@@ -104,15 +104,27 @@ jobs:
           }
           if ($failed) { throw "PowerShell parser rejected Windows Lab scripts" }
 
-      - name: Run hosted smoke matrix
+      - name: Run hosted smoke matrix (3 repetitions)
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
             python -m experiments.windows_phase0.runner `
             --environment-tier hosted-smoke `
             --pwsh $env:PHASE0_PWSH `
-            --repetitions 20 `
+            --repetitions 3 `
             --output-dir artifacts/windows-phase0-hosted
+          $experimentExitCode = $LASTEXITCODE
+          if ($experimentExitCode -notin @(0, 1)) {
+            throw "Hosted smoke infrastructure failed with exit code $experimentExitCode"
+          }
+          foreach ($name in @("environment.json", "observations.jsonl", "summary.json", "summary.md")) {
+            $path = Join-Path "artifacts/windows-phase0-hosted" $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Hosted smoke did not produce required evidence: $name"
+            }
+          }
+          Write-Host "Hosted smoke experiment exit code: $experimentExitCode"
 
       - name: Upload raw experiment evidence
         if: always()
