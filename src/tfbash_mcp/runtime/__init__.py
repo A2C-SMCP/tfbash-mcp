@@ -23,6 +23,7 @@ from tfbash_mcp.runtime.config import (
     resolve_runtime,
 )
 from tfbash_mcp.runtime.contracts import (
+    CancellationSignal,
     CleanupResult,
     CommandFrame,
     ControlDelivery,
@@ -114,6 +115,7 @@ __all__ = [
     "AgentRuntimeContext",
     "BashDialect",
     "BashProtocol",
+    "CancellationSignal",
     "CleanupResult",
     "CleanupTimeout",
     "CommandFrame",

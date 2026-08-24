@@ -20,6 +20,7 @@ from threading import Condition, Event, Lock, Thread
 from typing import Protocol, runtime_checkable
 
 from tfbash_mcp.runtime.contracts import (
+    CancellationSignal,
     ProcessOwnership,
     ReadStatus,
     RuntimeName,
@@ -181,12 +182,15 @@ class ConPtyTransport:
         ownership: ProcessOwnership,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> RuntimeSession:
         if not isinstance(ownership, WindowsSpawnOwnership):
             raise TransportError("ConPTY transport requires prepared Windows ownership")
         _validate_spawn_request(request)
         if deadline_ms is not None and deadline_ms <= 0:
             raise TransportError("ConPTY spawn deadline expired")
+        if cancel_signal is not None and cancel_signal.is_set():
+            raise TransportError("ConPTY spawn was cancelled")
         deadline = None if deadline_ms is None else time.monotonic() + deadline_ms / 1000
         pty: ConPtyLike | None = None
         try:
@@ -209,6 +213,8 @@ class ConPtyTransport:
             process_id = _valid_process_id(pty.pid)
             if process_id is not None:
                 ownership.attach(process_id)
+            if cancel_signal is not None and cancel_signal.is_set():
+                raise TransportError("ConPTY spawn was cancelled")
             if not spawned:
                 raise TransportError("pywinpty did not spawn the requested process")
             if process_id is None:
@@ -358,7 +364,17 @@ class ConPtyTransport:
         if item.error is not None:
             raise TransportError("failed to resize ConPTY") from item.error
 
-    def close(self, session: RuntimeSession) -> None:
+    def close(
+        self,
+        session: RuntimeSession,
+        *,
+        deadline_ms: int | None = None,
+    ) -> None:
+        close_timeout_ms = (
+            self._close_timeout_ms
+            if deadline_ms is None
+            else min(self._close_timeout_ms, max(0, deadline_ms))
+        )
         concrete = self._session(session)
         with concrete._close_lock:
             with concrete._condition:
@@ -384,7 +400,7 @@ class ConPtyTransport:
                     pty.cancel_io()
                 except Exception as error:
                     cancel_error = error
-            deadline = time.monotonic() + self._close_timeout_ms / 1000
+            deadline = time.monotonic() + close_timeout_ms / 1000
             for thread in (reader, writer):
                 if thread is not None:
                     thread.join(max(0.0, deadline - time.monotonic()))

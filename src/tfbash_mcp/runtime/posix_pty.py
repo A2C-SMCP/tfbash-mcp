@@ -17,6 +17,7 @@ from typing import Any, Protocol, runtime_checkable
 import pexpect  # type: ignore[import-untyped]
 
 from tfbash_mcp.runtime.contracts import (
+    CancellationSignal,
     ProcessOwnership,
     ReadStatus,
     RuntimeName,
@@ -91,6 +92,7 @@ class PexpectPosixPtyTransport:
         ownership: ProcessOwnership,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> RuntimeSession:
         if not isinstance(ownership, PosixSpawnOwnership):
             raise TransportError("POSIX transport requires prepared POSIX ownership")
@@ -101,6 +103,8 @@ class PexpectPosixPtyTransport:
         try:
             if deadline_ms is not None and deadline_ms <= 0:
                 raise TransportError("POSIX PTY spawn deadline expired")
+            if cancel_signal is not None and cancel_signal.is_set():
+                raise TransportError("POSIX PTY spawn was cancelled")
             ownership.reserve()
             child = pexpect.spawn(
                 request.executable,
@@ -115,6 +119,8 @@ class PexpectPosixPtyTransport:
                 preexec_fn=ownership.child_setup,
             )
             ownership.attach(int(child.pid), int(child.child_fd))
+            if cancel_signal is not None and cancel_signal.is_set():
+                raise TransportError("POSIX PTY spawn was cancelled")
             if deadline is not None and time.monotonic() >= deadline:
                 raise TransportError("POSIX PTY spawn deadline expired")
             transport_fd = os.dup(child.child_fd)
@@ -244,7 +250,12 @@ class PexpectPosixPtyTransport:
                     ready.add(WaitInterest.READABLE)
         return frozenset(ready)
 
-    def close(self, session: RuntimeSession) -> None:
+    def close(
+        self,
+        session: RuntimeSession,
+        *,
+        deadline_ms: int | None = None,
+    ) -> None:
         concrete = self._session(session)
         with concrete._close_lock:
             if concrete._closed:

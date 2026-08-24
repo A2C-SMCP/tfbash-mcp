@@ -42,6 +42,14 @@ class WaitInterest(str, Enum):
     PROCESS_EXIT = "process_exit"
 
 
+class CancellationSignal(Protocol):
+    """Cooperative cancellation shared across bounded runtime phases."""
+
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
 class DialectEventKind(str, Enum):
     BOOTSTRAP_REQUIRED = "bootstrap_required"
     OUTPUT = "output"
@@ -146,10 +154,7 @@ class DialectEvent:
         if self.kind is DialectEventKind.FINALIZED:
             if self.correlation_id is None:
                 raise ValueError("finalized events require correlation_id")
-            if any(
-                value is not None
-                for value in (self.exit_code, self.cwd, self.shell_version)
-            ):
+            if any(value is not None for value in (self.exit_code, self.cwd, self.shell_version)):
                 raise ValueError("finalized events contain only correlation_id")
             return
         if self.shell_version is not None:
@@ -247,6 +252,7 @@ class ShellDialect(Protocol):
         request: ShellStartRequest,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> DialectSessionPlan: ...
 
 
@@ -262,6 +268,7 @@ class PtyTransport(Protocol):
         ownership: ProcessOwnership,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> RuntimeSession:
         """Spawn inside a prepared ownership boundary.
 
@@ -281,7 +288,12 @@ class PtyTransport(Protocol):
         timeout_ms: int,
     ) -> frozenset[WaitInterest]: ...
 
-    def close(self, session: RuntimeSession) -> None: ...
+    def close(
+        self,
+        session: RuntimeSession,
+        *,
+        deadline_ms: int | None = None,
+    ) -> None: ...
 
 
 class ProcessSupervisor(Protocol):
@@ -307,6 +319,8 @@ class ProcessSupervisor(Protocol):
         self,
         ownership: ProcessOwnership,
         intent: ControlIntent,
+        *,
+        deadline_ms: int | None = None,
     ) -> ControlDelivery: ...
 
     def is_alive(self, ownership: ProcessOwnership) -> bool: ...

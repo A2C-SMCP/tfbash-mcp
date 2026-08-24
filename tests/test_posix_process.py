@@ -220,7 +220,7 @@ def test_cleanup_reaps_running_stopped_stubborn_and_disowned_jobs(
     command = (
         f"{shlex.quote(sys.executable)} -c {shlex.quote(stubborn_script)} & disown; "
         "sleep 30 & disown; "
-        "sleep 30 & stopped=$!; kill -STOP \"$stopped\"; wait \"$stopped\" || true; "
+        'sleep 30 & stopped=$!; kill -STOP "$stopped"; wait "$stopped" || true; '
         f"for _ in {{1..200}}; do test -s {shlex.quote(str(stubborn_ready))} && break; "
         "sleep 0.01; done; "
         f"test -s {shlex.quote(str(stubborn_ready))}"
@@ -383,9 +383,7 @@ def test_domain_intents_have_exact_private_posix_signal_mapping(
     monkeypatch.setattr(
         os,
         "killpg",
-        lambda process_group, native_signal: delivered.append(
-            (process_group, native_signal)
-        ),
+        lambda process_group, native_signal: delivered.append((process_group, native_signal)),
     )
 
     assert supervisor.control(ownership, intent).delivered
@@ -535,12 +533,19 @@ def test_slow_identity_enumeration_respects_absolute_deadline(
         time.sleep(0.01)
         return 123
 
+    forced: list[tuple[int, int]] = []
     monkeypatch.setattr(os, "getsid", slow_getsid)
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda process_group, native_signal: forced.append((process_group, native_signal)),
+    )
     started = time.monotonic()
     result = supervisor.cleanup(ownership, deadline_ms=25)
     elapsed = time.monotonic() - started
     assert not result.reaped
     assert result.remaining_managed_processes > 0
+    assert forced == [(123, signal.SIGKILL)]
     assert elapsed < 0.1
 
 

@@ -17,6 +17,7 @@ from enum import Enum, auto
 from pathlib import PureWindowsPath
 
 from tfbash_mcp.runtime.contracts import (
+    CancellationSignal,
     CommandFrame,
     DialectEvent,
     DialectEventKind,
@@ -110,9 +111,12 @@ class PowerShellDialect:
         request: ShellStartRequest,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> DialectSessionPlan:
         if deadline_ms is not None and deadline_ms <= 0:
             raise DialectProtocolError("PowerShell session preparation deadline expired")
+        if cancel_signal is not None and cancel_signal.is_set():
+            raise DialectProtocolError("PowerShell session preparation was cancelled")
         _validate_start_request(request)
         session_token = _validate_token(self._token_factory())
         protocol = PowerShellProtocol(
@@ -120,6 +124,8 @@ class PowerShellDialect:
             token_factory=self._token_factory,
             max_control_bytes=self._max_control_bytes,
         )
+        if cancel_signal is not None and cancel_signal.is_set():
+            raise DialectProtocolError("PowerShell session preparation was cancelled")
         launch_script = (
             protocol._prompt_definition()
             + ";"

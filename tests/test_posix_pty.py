@@ -11,7 +11,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, cast
 
 import pexpect  # type: ignore[import-untyped]
@@ -23,6 +23,8 @@ from tfbash_mcp.runtime import (
     DialectEventKind,
     PexpectPosixPtyTransport,
     PexpectPosixSession,
+    PosixBashProfile,
+    PosixProcessSupervisor,
     ReadStatus,
     ShellStartRequest,
     SpawnRequest,
@@ -65,6 +67,55 @@ class _Ownership:
             os.kill(self.process_id, signal.SIGKILL)
         with suppress(ChildProcessError):
             os.waitpid(self.process_id, 0)
+
+
+def test_profile_cancels_a_blocked_real_posix_spawn_and_retains_late_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_spawn_started = Event()
+    native_spawn_release = Event()
+
+    def blocked_spawn(*args: object, **kwargs: object) -> object:
+        native_spawn_started.set()
+        native_spawn_release.wait()
+        raise OSError("injected late native spawn failure")
+
+    monkeypatch.setattr(pexpect, "spawn", blocked_spawn)
+    profile = PosixBashProfile(
+        dialect=BashDialect(token_factory=lambda: "A" * 32),
+        transport=PexpectPosixPtyTransport(),
+        supervisor=PosixProcessSupervisor(),
+    )
+    cancel_signal = Event()
+    errors: list[Exception] = []
+
+    def open_session() -> None:
+        try:
+            profile.open_session(
+                SpawnRequest("/bin/bash", (), "/workspace", {}),
+                cleanup_deadline_ms=200,
+                startup_deadline_ms=1000,
+                cancel_signal=cancel_signal,
+            )
+        except Exception as error:
+            errors.append(error)
+
+    caller = Thread(target=open_session)
+    caller.start()
+    assert native_spawn_started.wait(1)
+
+    cancel_signal.set()
+    caller.join(0.2)
+
+    assert not caller.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], TransportError)
+    assert "cancelled" in str(errors[0])
+    assert profile.has_pending_startup_cleanup
+
+    native_spawn_release.set()
+    assert profile.cleanup_pending_startups(deadline_ms=500)
+    assert not profile.has_pending_startup_cleanup
 
 
 @dataclass
@@ -208,9 +259,7 @@ def test_fast_exit_tail_is_drained_completely_twenty_times() -> None:
     for iteration in range(20):
         transport = PexpectPosixPtyTransport()
         owner = _Ownership(f"tail-{iteration}")
-        request = _python_request(
-            "import os; os.write(1, " + repr(expected) + ")"
-        )
+        request = _python_request("import os; os.write(1, " + repr(expected) + ")")
         session = cast(PexpectPosixSession, transport.spawn(request, owner))
         try:
             assert _drain(transport, session) == expected
@@ -259,10 +308,7 @@ def test_backpressure_reports_partial_write_while_read_and_close_progress() -> N
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX PTY test")
 def test_cursor_retries_deliver_large_payload_exactly_once() -> None:
-    payload = b"".join(
-        hashlib.sha256(index.to_bytes(4, "big")).digest()
-        for index in range(65_536)
-    )
+    payload = b"".join(hashlib.sha256(index.to_bytes(4, "big")).digest() for index in range(65_536))
     expected_digest = hashlib.sha256(payload).hexdigest().encode()
     transport = PexpectPosixPtyTransport()
     owner = _Ownership("cursor-delivery")
@@ -484,13 +530,7 @@ def test_session_cannot_cross_transport_or_have_concurrent_reader() -> None:
 
 
 def test_transport_source_never_uses_blocking_expect_or_select_select() -> None:
-    source_path = (
-        Path(__file__).parents[1]
-        / "src"
-        / "tfbash_mcp"
-        / "runtime"
-        / "posix_pty.py"
-    )
+    source_path = Path(__file__).parents[1] / "src" / "tfbash_mcp" / "runtime" / "posix_pty.py"
     tree = ast.parse(source_path.read_text())
     calls = {
         node.func.attr

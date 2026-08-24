@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from threading import Lock
 from typing import ClassVar
@@ -113,9 +114,7 @@ class PosixProcessOwnership:
         except ProcessLookupError:
             pass
         except OSError as error:
-            raise ProcessControlError(
-                "failed to terminate an invalid POSIX attachment"
-            ) from error
+            raise ProcessControlError("failed to terminate an invalid POSIX attachment") from error
         try:
             os.waitpid(process_id, 0)
         except ChildProcessError:
@@ -161,6 +160,8 @@ class PosixProcessSupervisor:
         self,
         ownership: ProcessOwnership,
         intent: ControlIntent,
+        *,
+        deadline_ms: int | None = None,
     ) -> ControlDelivery:
         concrete = self._ownership(ownership)
         with concrete._lock:
@@ -180,8 +181,12 @@ class PosixProcessSupervisor:
                 ) from error
             if foreground_group <= 0:
                 return ControlDelivery(delivered=False)
+            timeout_seconds = 1.0 if deadline_ms is None else max(0, deadline_ms) / 1000
             try:
-                records = self._session_processes(process_id, timeout_seconds=1.0)
+                records = self._session_processes(
+                    process_id,
+                    timeout_seconds=timeout_seconds,
+                )
             except _DeadlineExpired as error:
                 raise ProcessControlError(
                     "timed out validating the foreground process group"
@@ -211,9 +216,7 @@ class PosixProcessSupervisor:
             try:
                 records = self._session_processes(process_id, timeout_seconds=1.0)
             except _DeadlineExpired as error:
-                raise ProcessControlError(
-                    "timed out checking POSIX process ownership"
-                ) from error
+                raise ProcessControlError("timed out checking POSIX process ownership") from error
             if any(not record.is_zombie for record in records):
                 return True
             return not self._finalize_leader(concrete)
@@ -309,25 +312,30 @@ class PosixProcessSupervisor:
             try:
                 records = self._snapshot_before_deadline(process_id, deadline)
             except ProcessControlError:
-                self._signal_known_groups(concrete, signal.SIGKILL, deadline)
+                self._force_known_groups(concrete)
                 raise
             if records is None:
+                self._force_known_groups(concrete)
                 return CleanupResult(reaped=False, remaining_managed_processes=1)
             if not records:
                 if self._finalize_leader(concrete):
                     self._close_terminal(concrete)
                     return CleanupResult(reaped=True, remaining_managed_processes=0)
+                self._force_known_groups(concrete)
                 return CleanupResult(reaped=False, remaining_managed_processes=1)
             if not self._outstanding_records(records, process_id):
                 if self._finalize_leader(concrete):
                     self._close_terminal(concrete)
                     return CleanupResult(reaped=True, remaining_managed_processes=0)
+                self._force_known_groups(concrete)
                 return CleanupResult(reaped=False, remaining_managed_processes=1)
 
             groups = self._ordered_groups(records, concrete._shell_process_group_id)
             if not self._signal_groups(groups, signal.SIGCONT, deadline):
+                self._force_known_groups(concrete)
                 return self._incomplete_result(records, process_id)
             if not self._signal_groups(groups, signal.SIGTERM, deadline):
+                self._force_known_groups(concrete)
                 return self._incomplete_result(records, process_id)
 
             remaining = records
@@ -340,18 +348,22 @@ class PosixProcessSupervisor:
                     concrete._shell_process_group_id,
                 )
                 if not self._signal_groups(remaining_groups, signal.SIGCONT, deadline):
+                    self._force_known_groups(concrete)
                     return self._incomplete_result(remaining, process_id)
                 if not self._signal_groups(remaining_groups, signal.SIGKILL, deadline):
+                    self._force_known_groups(concrete)
                     return self._incomplete_result(remaining, process_id)
                 remaining = self._wait_for_session(process_id, deadline, remaining)
 
             outstanding = self._outstanding_records(remaining, process_id)
             if not outstanding:
                 if not self._finalize_leader(concrete):
+                    self._force_known_groups(concrete)
                     return CleanupResult(reaped=False, remaining_managed_processes=1)
                 self._close_terminal(concrete)
                 return CleanupResult(reaped=True, remaining_managed_processes=0)
             count = len({record.process_id for record in outstanding})
+            self._force_known_groups(concrete)
             return CleanupResult(
                 reaped=False,
                 remaining_managed_processes=count,
@@ -388,9 +400,7 @@ class PosixProcessSupervisor:
         process_id: int,
     ) -> list[_ProcessRecord]:
         return [
-            record
-            for record in records
-            if record.process_id != process_id or not record.is_zombie
+            record for record in records if record.process_id != process_id or not record.is_zombie
         ]
 
     @classmethod
@@ -399,9 +409,7 @@ class PosixProcessSupervisor:
         records: list[_ProcessRecord],
         process_id: int,
     ) -> CleanupResult:
-        count = len(
-            {record.process_id for record in cls._outstanding_records(records, process_id)}
-        )
+        count = len({record.process_id for record in cls._outstanding_records(records, process_id)})
         return CleanupResult(reaped=False, remaining_managed_processes=max(1, count))
 
     @staticmethod
@@ -490,8 +498,7 @@ class PosixProcessSupervisor:
             {
                 record.process_group_id
                 for record in records
-                if record.process_group_id > 0
-                and record.process_group_id != shell_process_group_id
+                if record.process_group_id > 0 and record.process_group_id != shell_process_group_id
             }
         )
         if not cls._signal_groups(groups, native_signal, deadline):
@@ -507,9 +514,7 @@ class PosixProcessSupervisor:
             except ProcessLookupError:
                 continue
             except OSError as error:
-                raise ProcessControlError(
-                    "failed to clean up a POSIX execution process"
-                ) from error
+                raise ProcessControlError("failed to clean up a POSIX execution process") from error
         return True
 
     def _snapshot_before_deadline(
@@ -529,7 +534,7 @@ class PosixProcessSupervisor:
     def _signal_known_groups(
         ownership: PosixProcessOwnership,
         native_signal: int,
-        deadline: float,
+        deadline: float | None,
     ) -> bool:
         groups: set[int] = set()
         if ownership._terminal_file_descriptor >= 0:
@@ -546,6 +551,13 @@ class PosixProcessSupervisor:
             native_signal,
             deadline,
         )
+
+    @classmethod
+    def _force_known_groups(cls, ownership: PosixProcessOwnership) -> None:
+        # The forced attempt is best-effort and never upgrades an incomplete
+        # cleanup result to reaped. A later reaper retains the same owner.
+        with suppress(ProcessControlError):
+            cls._signal_known_groups(ownership, signal.SIGKILL, None)
 
     @staticmethod
     def _session_processes(
@@ -638,7 +650,5 @@ class PosixProcessSupervisor:
             os.close(ownership._terminal_file_descriptor)
         except OSError as error:
             if error.errno != errno.EBADF:
-                raise ProcessControlError(
-                    "failed to close the POSIX ownership terminal"
-                ) from error
+                raise ProcessControlError("failed to close the POSIX ownership terminal") from error
         ownership._terminal_file_descriptor = -1

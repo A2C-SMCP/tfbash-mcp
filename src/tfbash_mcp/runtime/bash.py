@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from tfbash_mcp.runtime.contracts import (
+    CancellationSignal,
     CommandFrame,
     DialectEvent,
     DialectEventKind,
@@ -105,9 +106,12 @@ class BashDialect:
         request: ShellStartRequest,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> DialectSessionPlan:
         if deadline_ms is not None and deadline_ms <= 0:
             raise DialectProtocolError("Bash session preparation deadline expired")
+        if cancel_signal is not None and cancel_signal.is_set():
+            raise DialectProtocolError("Bash session preparation was cancelled")
         _validate_start_request(request)
         session_token = _validate_token(self._token_factory())
         protocol = BashProtocol(
@@ -115,6 +119,8 @@ class BashDialect:
             token_factory=self._token_factory,
             max_control_bytes=self._max_control_bytes,
         )
+        if cancel_signal is not None and cancel_signal.is_set():
+            raise DialectProtocolError("Bash session preparation was cancelled")
         launch_environment = dict(request.environment)
         launch_environment.update(
             PS1=protocol._prompt.decode("ascii") + " ",
@@ -164,8 +170,8 @@ class BashProtocol(DialectProtocol):
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
             f"{self._base64_variable}=$(command -v base64 2>/dev/null || :); "
-            "if [ -z \"${BASH_VERSION:-}\" ] || "
-            f"[ -z \"${self._base64_variable}\" ]; then "
+            'if [ -z "${BASH_VERSION:-}" ] || '
+            f'[ -z "${self._base64_variable}" ]; then '
             "__tfbash_probe=1; __tfbash_rc=126; "
             "__tfbash_version_b64=''; __tfbash_cwd_b64=''; "
             "else __tfbash_probe=0; "
@@ -173,7 +179,7 @@ class BashProtocol(DialectProtocol):
             f"{startup}; __tfbash_rc=$?; fi; "
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
-            "if [ \"$__tfbash_probe\" -eq 0 ]; then "
+            'if [ "$__tfbash_probe" -eq 0 ]; then '
             "__tfbash_cwd=$(pwd -P); "
             f"__tfbash_version_b64=$(printf '%s' \"${{BASH_VERSION:-}}\" | "
             f'"${self._base64_variable}"); '
@@ -197,9 +203,7 @@ class BashProtocol(DialectProtocol):
         command_token = _validate_token(self._token_factory())
         correlation_id = f"bash_{command_token}"
         begin_marker = (
-            _RECORD_SEPARATOR
-            + f"TFBASH_BEGIN_{command_token}".encode()
-            + _UNIT_SEPARATOR
+            _RECORD_SEPARATOR + f"TFBASH_BEGIN_{command_token}".encode() + _UNIT_SEPARATOR
         )
         result_prefix = _RECORD_SEPARATOR + f"TFBASH_END_{command_token}:".encode()
         self._pending_command = _PendingCommand(
@@ -258,12 +262,9 @@ class BashProtocol(DialectProtocol):
         """Flush job notifications behind a private marker and prompt acknowledgement."""
 
         normal_completion = (
-            self._state is _ParserState.AWAITING_FINALIZATION
-            and self._pending_command is not None
+            self._state is _ParserState.AWAITING_FINALIZATION and self._pending_command is not None
         )
-        recovered_completion = (
-            self._state is _ParserState.READY and self._pending_command is None
-        )
+        recovered_completion = self._state is _ParserState.READY and self._pending_command is None
         if (
             not (normal_completion or recovered_completion)
             or self._pending_finalization is not None
@@ -294,14 +295,18 @@ class BashProtocol(DialectProtocol):
         if self._state is _ParserState.CLOSED:
             return ()
         events: list[DialectEvent] = []
-        if self._state in {
-            _ParserState.CAPTURING,
-            _ParserState.FINALIZING,
-            _ParserState.FINDING_RECOVERY,
-            _ParserState.AWAITING_FINALIZATION,
-            _ParserState.FINDING_FINALIZATION,
-            _ParserState.FINALIZATION_PROMPT,
-        } and self._buffer:
+        if (
+            self._state
+            in {
+                _ParserState.CAPTURING,
+                _ParserState.FINALIZING,
+                _ParserState.FINDING_RECOVERY,
+                _ParserState.AWAITING_FINALIZATION,
+                _ParserState.FINDING_FINALIZATION,
+                _ParserState.FINALIZATION_PROMPT,
+            }
+            and self._buffer
+        ):
             events.append(DialectEvent(DialectEventKind.OUTPUT, data=bytes(self._buffer)))
         self._buffer.clear()
         self._pending_command = None
@@ -629,7 +634,7 @@ class BashProtocol(DialectProtocol):
 
 def _encoded_eval(command: str, decoder: str) -> str:
     blob = base64.b64encode(command.encode("utf-8")).decode("ascii")
-    return f'eval "$(printf \'%s\' \'{blob}\' | {decoder} --decode)"'
+    return f"eval \"$(printf '%s' '{blob}' | {decoder} --decode)\""
 
 
 def _decode_text_field(field: bytes, label: str) -> str:

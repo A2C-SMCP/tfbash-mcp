@@ -3,13 +3,17 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 
 import pytest
 
 from tfbash_mcp.runtime import (
+    CancellationSignal,
     CleanupResult,
+    CleanupTimeout,
     CommandFrame,
     ControlDelivery,
     ControlIntent,
@@ -82,6 +86,7 @@ class _Dialect:
         request: ShellStartRequest,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> DialectSessionPlan:
         self.next_session += 1
         marker = f"marker-{self.next_session}"
@@ -106,6 +111,8 @@ class _Transport:
     writes: list[bytes] = field(default_factory=list)
     closed: set[str] = field(default_factory=set)
     fail_spawn: bool = False
+    cancel_during_spawn: Event | None = None
+    close_failures: int = 0
 
     def spawn(
         self,
@@ -113,11 +120,14 @@ class _Transport:
         ownership: ProcessOwnership,
         *,
         deadline_ms: int | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> RuntimeSession:
         if self.fail_spawn:
             raise OSError("spawn failed")
         session = _Session(f"session-{len(self.spawned) + 1}")
         self.spawned.append(session)
+        if self.cancel_during_spawn is not None:
+            self.cancel_during_spawn.set()
         return session
 
     def read(self, session: RuntimeSession, max_bytes: int) -> TransportRead:
@@ -136,7 +146,15 @@ class _Transport:
     ) -> frozenset[WaitInterest]:
         return interests
 
-    def close(self, session: RuntimeSession) -> None:
+    def close(
+        self,
+        session: RuntimeSession,
+        *,
+        deadline_ms: int | None = None,
+    ) -> None:
+        if self.close_failures > 0:
+            self.close_failures -= 1
+            raise TransportError("injected PTY close failure")
         self.closed.add(session.session_id)
 
 
@@ -146,6 +164,8 @@ class _Supervisor:
     owners: set[str] = field(default_factory=set)
     cleaned: set[str] = field(default_factory=set)
     fail_prepare: bool = False
+    cancel_after_prepare: Event | None = None
+    cleanup_failures: int = 0
 
     def prepare(self) -> ProcessOwnership:
         owner = _Ownership(f"owner-{len(self.owners) + 1}")
@@ -153,12 +173,16 @@ class _Supervisor:
         if self.fail_prepare:
             self.owners.discard(owner.ownership_id)
             raise OSError("native ownership setup failed")
+        if self.cancel_after_prepare is not None:
+            self.cancel_after_prepare.set()
         return owner
 
     def control(
         self,
         ownership: ProcessOwnership,
         intent: ControlIntent,
+        *,
+        deadline_ms: int | None = None,
     ) -> ControlDelivery:
         return ControlDelivery(ownership.ownership_id in self.owners)
 
@@ -179,6 +203,9 @@ class _Supervisor:
         *,
         deadline_ms: int,
     ) -> CleanupResult:
+        if self.cleanup_failures > 0:
+            self.cleanup_failures -= 1
+            return CleanupResult(reaped=False, remaining_managed_processes=1)
         self.owners.discard(ownership.ownership_id)
         self.cleaned.add(ownership.ownership_id)
         return CleanupResult(reaped=True, remaining_managed_processes=0)
@@ -219,19 +246,20 @@ def test_both_profiles_obey_the_same_port_contract(name: RuntimeName) -> None:
     ) == frozenset({WaitInterest.READABLE, WaitInterest.PROCESS_EXIT})
     read = profile.transport.read(session, 1024)
     assert read == TransportRead(ReadStatus.DATA, b"ready")
-    assert plan.protocol.feed(read.data) == (
-        DialectEvent(DialectEventKind.OUTPUT, data=b"ready"),
-    )
+    assert plan.protocol.feed(read.data) == (DialectEvent(DialectEventKind.OUTPUT, data=b"ready"),)
     frame = plan.protocol.wrap_command("echo test")
     assert frame.correlation_id
     assert profile.transport.write(session, memoryview(frame.input_bytes)).bytes_written > 0
     delivery = profile.supervisor.control(ownership, ControlIntent.INTERRUPT)
     assert delivery.delivered is True
     assert profile.supervisor.is_alive(ownership) is True
-    assert profile.supervisor.cleanup(
-        ownership,
-        deadline_ms=100,
-    ).reaped is True
+    assert (
+        profile.supervisor.cleanup(
+            ownership,
+            deadline_ms=100,
+        ).reaped
+        is True
+    )
     profile.transport.close(session)
 
 
@@ -243,9 +271,10 @@ def test_dialect_launch_and_parser_state_are_paired_per_shell() -> None:
     second = dialect.prepare_session(request)
 
     assert first.launch.initial_input != second.launch.initial_input
-    assert first.protocol.wrap_command("true").input_bytes != second.protocol.wrap_command(
-        "true"
-    ).input_bytes
+    assert (
+        first.protocol.wrap_command("true").input_bytes
+        != second.protocol.wrap_command("true").input_bytes
+    )
 
 
 def test_spawn_failure_reaps_prepared_ownership() -> None:
@@ -265,6 +294,107 @@ def test_spawn_failure_reaps_prepared_ownership() -> None:
     assert isinstance(caught.value.__cause__, OSError)
     assert supervisor.owners == set()
     assert supervisor.cleaned == {"owner-1"}
+
+
+def test_cancellation_after_prepare_reaps_ownership_before_spawn() -> None:
+    profile = _build_profile(RuntimeName.POSIX_BASH)
+    transport = profile.transport
+    supervisor = profile.supervisor
+    assert isinstance(transport, _Transport)
+    assert isinstance(supervisor, _Supervisor)
+    cancel_signal = Event()
+    supervisor.cancel_after_prepare = cancel_signal
+
+    with pytest.raises(TransportError, match="runtime startup was cancelled"):
+        profile.open_session(
+            SpawnRequest("/bin/bash", (), "/workspace", {}),
+            cleanup_deadline_ms=100,
+            cancel_signal=cancel_signal,
+        )
+
+    assert transport.spawned == []
+    assert supervisor.owners == set()
+    assert supervisor.cleaned == {"owner-1"}
+
+
+def test_cancellation_after_spawn_closes_pty_and_reaps_ownership() -> None:
+    profile = _build_profile(RuntimeName.POSIX_BASH)
+    transport = profile.transport
+    supervisor = profile.supervisor
+    assert isinstance(transport, _Transport)
+    assert isinstance(supervisor, _Supervisor)
+    cancel_signal = Event()
+    transport.cancel_during_spawn = cancel_signal
+
+    with pytest.raises(TransportError, match="runtime startup was cancelled"):
+        profile.open_session(
+            SpawnRequest("/bin/bash", (), "/workspace", {}),
+            cleanup_deadline_ms=100,
+            cancel_signal=cancel_signal,
+        )
+
+    assert [session.session_id for session in transport.spawned] == ["session-1"]
+    assert transport.closed == {"session-1"}
+    assert supervisor.owners == set()
+    assert supervisor.cleaned == {"owner-1"}
+
+
+def test_failed_startup_rollback_is_retained_and_retried_to_completion() -> None:
+    profile = _build_profile(RuntimeName.POSIX_BASH)
+    transport = profile.transport
+    supervisor = profile.supervisor
+    assert isinstance(transport, _Transport)
+    assert isinstance(supervisor, _Supervisor)
+    cancel_signal = Event()
+    transport.cancel_during_spawn = cancel_signal
+    transport.close_failures = 1
+    supervisor.cleanup_failures = 1
+
+    with pytest.raises(CleanupTimeout, match="ownership cleanup timed out"):
+        profile.open_session(
+            SpawnRequest("/bin/bash", (), "/workspace", {}),
+            cleanup_deadline_ms=100,
+            cancel_signal=cancel_signal,
+        )
+
+    assert profile.has_pending_startup_cleanup
+    assert transport.closed == set()
+    assert supervisor.owners == {"owner-1"}
+
+    assert profile.cleanup_pending_startups(deadline_ms=100)
+    assert not profile.has_pending_startup_cleanup
+    assert transport.closed == {"session-1"}
+    assert supervisor.owners == set()
+    assert supervisor.cleaned == {"owner-1"}
+
+
+def test_spawn_thread_start_failure_rolls_back_prepared_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _build_profile(RuntimeName.POSIX_BASH)
+    transport = profile.transport
+    supervisor = profile.supervisor
+    assert isinstance(transport, _Transport)
+    assert isinstance(supervisor, _Supervisor)
+    original_start = threading.Thread.start
+
+    def injected_start(thread: threading.Thread) -> None:
+        if thread.name.startswith("tfbash-spawn-"):
+            raise RuntimeError("injected thread exhaustion")
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", injected_start)
+
+    with pytest.raises(TransportError, match="isolated PTY spawn"):
+        profile.open_session(
+            SpawnRequest("/bin/bash", (), "/workspace", {}),
+            cleanup_deadline_ms=100,
+        )
+
+    assert transport.spawned == []
+    assert supervisor.owners == set()
+    assert supervisor.cleaned == {"owner-1"}
+    assert not profile.has_pending_startup_cleanup
 
 
 @pytest.mark.parametrize("name", list(RuntimeName))
@@ -371,9 +501,7 @@ def test_ports_do_not_accept_host_config_or_expose_native_identity_names() -> No
     ).read_text()
     tree = ast.parse(source)
     referenced_names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-    declared_names = {
-        node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)
-    } | {
+    declared_names = {node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)} | {
         node.target.id
         for node in ast.walk(tree)
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)

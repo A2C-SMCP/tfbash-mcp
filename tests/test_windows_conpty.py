@@ -12,8 +12,12 @@ from typing import cast
 import pytest
 
 from tfbash_mcp.runtime import (
+    CleanupResult,
     ConPtySession,
     ConPtyTransport,
+    ControlDelivery,
+    ControlIntent,
+    PowerShellDialect,
     ProcessOwnership,
     ReadStatus,
     RuntimeName,
@@ -21,6 +25,7 @@ from tfbash_mcp.runtime import (
     TransportClosed,
     TransportError,
     WaitInterest,
+    WindowsPwshProfile,
 )
 from tfbash_mcp.runtime.windows_conpty import _create_pywinpty_conpty
 
@@ -53,12 +58,55 @@ class _WrongOwnership:
         return "wrong"
 
 
+class _Supervisor:
+    runtime_name = RuntimeName.WINDOWS_PWSH
+
+    def __init__(self) -> None:
+        self.owner = _Ownership()
+        self.cleaned: list[str] = []
+
+    def prepare(self) -> ProcessOwnership:
+        return self.owner
+
+    def control(
+        self,
+        ownership: ProcessOwnership,
+        intent: ControlIntent,
+        *,
+        deadline_ms: int | None = None,
+    ) -> ControlDelivery:
+        return ControlDelivery(delivered=False)
+
+    def is_alive(self, ownership: ProcessOwnership) -> bool:
+        return False
+
+    def cleanup_execution(
+        self,
+        ownership: ProcessOwnership,
+        *,
+        deadline_ms: int,
+    ) -> CleanupResult:
+        return CleanupResult(reaped=True, remaining_managed_processes=0)
+
+    def cleanup(
+        self,
+        ownership: ProcessOwnership,
+        *,
+        deadline_ms: int,
+    ) -> CleanupResult:
+        self.cleaned.append(ownership.ownership_id)
+        return CleanupResult(reaped=True, remaining_managed_processes=0)
+
+
 class _FakePty:
     def __init__(self, *, pid: int = 4321) -> None:
         self.pid: int | None = pid
         self.spawn_result = True
         self.spawn_error: Exception | None = None
         self.spawn_calls: list[tuple[str, str | None, str | None, str | None]] = []
+        self.spawn_entered = threading.Event()
+        self.spawn_gate = threading.Event()
+        self.spawn_gate.set()
         self.writes: list[str] = []
         self.sizes: list[tuple[int, int]] = []
         self.cancel_calls = 0
@@ -92,6 +140,8 @@ class _FakePty:
         env: str | None = None,
     ) -> bool:
         self.spawn_calls.append((appname, cmdline, cwd, env))
+        self.spawn_entered.set()
+        self.spawn_gate.wait()
         if self.spawn_error is not None:
             raise self.spawn_error
         return self.spawn_result
@@ -197,6 +247,49 @@ def _spawn(
     owner = _Ownership()
     session = cast(ConPtySession, transport.spawn(_request(), owner, deadline_ms=1000))
     return transport, session, selected, owner
+
+
+def test_profile_cancels_blocked_conpty_spawn_and_reaps_its_late_owner() -> None:
+    fake = _FakePty()
+    fake.spawn_gate.clear()
+    supervisor = _Supervisor()
+    profile = WindowsPwshProfile(
+        dialect=PowerShellDialect(token_factory=lambda: "A" * 32),
+        transport=ConPtyTransport(pty_factory=lambda _columns, _rows: fake),
+        supervisor=supervisor,
+    )
+    cancel_signal = threading.Event()
+    errors: list[Exception] = []
+
+    def open_session() -> None:
+        try:
+            profile.open_session(
+                _request(),
+                cleanup_deadline_ms=200,
+                startup_deadline_ms=1000,
+                cancel_signal=cancel_signal,
+            )
+        except Exception as error:
+            errors.append(error)
+
+    caller = threading.Thread(target=open_session)
+    caller.start()
+    assert fake.spawn_entered.wait(1)
+
+    cancel_signal.set()
+    caller.join(0.2)
+
+    assert not caller.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], TransportError)
+    assert "cancelled" in str(errors[0])
+    assert profile.has_pending_startup_cleanup
+
+    fake.spawn_gate.set()
+    assert profile.cleanup_pending_startups(deadline_ms=500)
+    assert not profile.has_pending_startup_cleanup
+    assert supervisor.cleaned == ["owner-1"]
+    assert fake.cancel_calls == 1
 
 
 def _wait_until(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
