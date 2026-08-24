@@ -24,6 +24,10 @@ class ShellClosing(DomainError):
 class ShellUnavailable(DomainError):
     """The shell is rebuilding or is in an error state."""
 
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
 
 class ExecutionNotFound(DomainError):
     """The execution is unknown, expired, or belongs to another shell."""

@@ -210,9 +210,7 @@ class Execution:
         with self._lock:
             window = self._output.read(cursor, max_bytes)
             public_state = (
-                ExecutionState.RUNNING
-                if self._state is ExecutionState.FINALIZING
-                else self._state
+                ExecutionState.RUNNING if self._state is ExecutionState.FINALIZING else self._state
             )
             return ExecutionSnapshot(
                 shell_id=self.shell_id,
@@ -267,7 +265,10 @@ class CommandShell:
             if self._state is ShellState.CLOSING:
                 raise ShellClosing(f"shell {self.shell_id} is closing")
             if self._state in {ShellState.REBUILDING, ShellState.ERROR}:
-                raise ShellUnavailable(f"shell {self.shell_id} is unavailable")
+                raise ShellUnavailable(
+                    f"shell {self.shell_id} is unavailable",
+                    retryable=self._state is ShellState.REBUILDING,
+                )
             if self._state is ShellState.BUSY or self._active_execution is not None:
                 raise ShellBusy(f"shell {self.shell_id} is busy")
             if execution.shell_id != self.shell_id:
@@ -384,9 +385,7 @@ def _validate_terminal_result(
 ) -> None:
     allowed_statuses: dict[ExecutionState, frozenset[ShellState]] = {
         ExecutionState.EXITED: frozenset({ShellState.READY, ShellState.CLOSING}),
-        ExecutionState.TIMEOUT: frozenset(
-            {ShellState.READY, ShellState.ERROR, ShellState.CLOSING}
-        ),
+        ExecutionState.TIMEOUT: frozenset({ShellState.READY, ShellState.ERROR, ShellState.CLOSING}),
         ExecutionState.CANCELLED: frozenset({ShellState.CLOSING}),
         ExecutionState.SHELL_ERROR: frozenset({ShellState.ERROR, ShellState.CLOSING}),
     }

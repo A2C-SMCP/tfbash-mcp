@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from threading import Event
+from typing import Any, cast
+
+import anyio
+import pytest
+
+from tfbash_mcp.domain import (
+    CommandShellManager,
+    ExecutionSnapshot,
+    ExecutionState,
+    ShellSnapshot,
+    ShellState,
+)
+from tfbash_mcp.mcp_adapter import ToolConcurrencyLimits
+from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_contract_schemas
+from tfbash_mcp.runtime import PosixProcessSupervisor, RuntimeConfigurationError
+from tfbash_mcp.server import (
+    _blocked_windows_runtime,
+    _build_posix_runtime,
+    _create_tool_limiters,
+    _probe_shell_version,
+    _redact_sensitive_schema_defaults,
+    _run_tool_call,
+    _validate_cross_option_constraints,
+    build_parser,
+    build_service,
+)
+
+
+def test_cli_accepts_only_stdio_and_positive_resource_limits() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--transport", "http"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--max-command-shells", "0"])
+
+
+def test_cli_cross_option_deadlines_are_validated() -> None:
+    parser = build_parser()
+    too_short_close = parser.parse_args(
+        ["--shutdown-grace-ms", "5000", "--close-timeout-ms", "5000"]
+    )
+    too_long_quiet = parser.parse_args(
+        ["--output-quiet-ms", "3000", "--job-cleanup-timeout-ms", "3000"]
+    )
+
+    with pytest.raises(RuntimeConfigurationError, match="close-timeout-ms"):
+        _validate_cross_option_constraints(too_short_close)
+    with pytest.raises(RuntimeConfigurationError, match="output-quiet-ms"):
+        _validate_cross_option_constraints(too_long_quiet)
+
+
+def test_ide_host_requires_an_explicit_workspace_root() -> None:
+    arguments = build_parser().parse_args(["--host-profile", "ide"])
+
+    with pytest.raises(RuntimeConfigurationError, match="workspace_root"):
+        build_service(
+            arguments,
+            operating_system="linux",
+            process_cwd=str(Path.cwd()),
+            inherited_environment={},
+        )
+
+
+def test_windows_runtime_remains_fail_closed_until_issue_15() -> None:
+    with pytest.raises(RuntimeConfigurationError, match="atomic spawn-to-Job"):
+        _blocked_windows_runtime()
+
+
+def test_shell_version_probe_reports_a_redacted_configuration_error() -> None:
+    missing = str(Path.cwd() / "secret-shell-name-that-does-not-exist")
+
+    with pytest.raises(RuntimeConfigurationError) as captured:
+        _probe_shell_version(
+            missing,
+            windows=False,
+            cwd=str(Path.cwd()),
+            environment={},
+            timeout_ms=100,
+        )
+
+    assert str(captured.value) == "configured shell version probe failed"
+    assert "secret-shell-name" not in str(captured.value)
+
+
+def test_agent_visible_schema_omits_shell_and_startup_command_defaults() -> None:
+    secret_shell = "/secret/interpreter"
+    secret_startup = "export TOKEN=topsecret"
+    contracts = tool_contract_schemas(
+        ProtocolConfig(
+            platform=PlatformName.LINUX,
+            default_cwd=str(Path.cwd()),
+            shell=secret_shell,
+            startup_command=secret_startup,
+        )
+    )
+
+    _redact_sensitive_schema_defaults(contracts)
+
+    serialized = json.dumps(contracts)
+    open_properties = contracts[ToolName.SHELL_OPEN.value]["inputSchema"]["properties"]
+    assert isinstance(open_properties, dict)
+    assert "default" not in open_properties["shell"]
+    assert "default" not in open_properties["startup_command"]
+    assert secret_shell not in serialized
+    assert secret_startup not in serialized
+
+
+def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor() -> None:
+    arguments = build_parser().parse_args(
+        ["--close-timeout-ms", "5000", "--shutdown-grace-ms", "1234"]
+    )
+    service = build_service(
+        arguments,
+        operating_system="linux",
+        process_cwd=str(Path.cwd()),
+        inherited_environment={},
+    )
+    manager = cast(CommandShellManager, service._manager)
+    runtime = _build_posix_runtime(shutdown_grace_ms=1234)
+    supervisor = runtime.supervisor
+    assert isinstance(supervisor, PosixProcessSupervisor)
+
+    assert manager._config.worker.cleanup_deadline_ms == 5000
+    assert supervisor.shutdown_grace_ms == 1234
+    service.shutdown()
+
+
+def test_saturated_wait_lane_cannot_starve_close_control() -> None:
+    class BlockingExecManager:
+        def __init__(self) -> None:
+            self.active = Event()
+            self.release = Event()
+
+        def exec(self, *args: object, **kwargs: object) -> ExecutionSnapshot:
+            del args, kwargs
+            self.active.set()
+            assert self.release.wait(5)
+            return ExecutionSnapshot(
+                shell_id="shell_1",
+                exec_id="exec_1",
+                status=ExecutionState.CANCELLED,
+                exit_code=None,
+                output="",
+                buffer_start_cursor=0,
+                next_cursor=0,
+                truncated_before_cursor=False,
+                eof=True,
+                duration_ms=1,
+                cwd=None,
+                shell_status=ShellState.CLOSING,
+                shell_rebuilt=False,
+            )
+
+        def close_shell(self, shell_id: str) -> bool:
+            assert shell_id == "shell_1"
+            self.release.set()
+            return True
+
+        def snapshots(self) -> tuple[ShellSnapshot, ...]:
+            return (
+                ShellSnapshot(
+                    "shell_1",
+                    ShellState.BUSY,
+                    str(Path.cwd()),
+                    "exec_1" if self.active.is_set() else None,
+                    1,
+                ),
+            )
+
+        def shutdown(self) -> None:
+            self.release.set()
+
+    async def scenario() -> None:
+        arguments = build_parser().parse_args(
+            ["--close-timeout-ms", "5000", "--shutdown-grace-ms", "100"]
+        )
+        service = build_service(
+            arguments,
+            operating_system="linux",
+            process_cwd=str(Path.cwd()),
+            inherited_environment={},
+        )
+        service.shutdown()
+        manager = BlockingExecManager()
+        service._manager = cast(Any, manager)
+        service._concurrency_limits = ToolConcurrencyLimits(
+            wait_threads=1,
+            control_threads=1,
+            close_threads=1,
+            metadata_threads=1,
+        )
+        limiters = _create_tool_limiters(service)
+
+        async def long_execution() -> None:
+            await _run_tool_call(
+                service,
+                "shell_exec",
+                {"shell_id": "shell_1", "command": "sleep 30", "yield_ms": 60_000},
+                limiters,
+            )
+
+        async with anyio.create_task_group() as calls:
+            calls.start_soon(long_execution)
+            await anyio.to_thread.run_sync(manager.active.wait)
+
+            close_started = time.monotonic()
+            closed = await _run_tool_call(
+                service,
+                "shell_close",
+                {"shell_id": "shell_1"},
+                limiters,
+            )
+            assert time.monotonic() - close_started < 5.5
+            assert closed.structuredContent is not None
+            assert closed.structuredContent["status"] == "closed"
+
+        manager.shutdown()
+
+    anyio.run(scenario)

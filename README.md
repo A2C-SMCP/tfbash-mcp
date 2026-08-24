@@ -2,8 +2,8 @@
 
 面向 Agent 系统的基础 MCP 工具集合。项目希望为不同 Agent 提供一组稳定、可组合、低心智负担的通用能力，例如命令执行、文件读写与检索；具体能力优先复用成熟实现，只有现有方案无法满足核心约束时才考虑适配或自研。
 
-> 当前状态：Python 项目骨架与需求/架构 RFC。仓库可启动一个空的 stdio MCP Server，
-> 但尚未提供 RFC 中定义的 Shell 工具。
+> 当前状态：macOS/Linux 已提供七个持久 Shell 工具及 stdio MCP Server。
+> Windows Runtime Profile 会在启动时保持关闭，直到原生进程能以原子方式纳入 Job Object。
 
 ## 为什么做这个项目
 
@@ -85,13 +85,29 @@ uv run mypy
 uv run pytest --cov
 ```
 
-启动当前的 stdio Server 骨架：
+启动 stdio Server：
 
 ```bash
 uv run tfbash-mcp
 ```
 
-该进程目前不会注册 Shell 工具，只用于验证包、入口和 MCP stdio 生命周期。
+Server 注册 `shell_open`、`shell_exec`、`shell_read`、`shell_write`、
+`shell_signal`、`shell_list` 和 `shell_close`。默认使用当前目录作为 workspace root 和
+default cwd，并按宿主系统自动选择 Runtime Profile。IDE 集成应显式传入工作区：
+
+```bash
+uv run tfbash-mcp \
+  --host-profile ide \
+  --workspace-root /absolute/path/to/workspace
+```
+
+运行参数可通过 `uv run tfbash-mcp --help` 查看。配置优先级为单次 `shell_open` 参数、
+进程级 CLI/HostConfig、Runtime Profile 默认值。继承的环境变量只用于启动 Shell；
+`shell_list` 仅返回环境类型和可选名称，不返回环境变量名、值、启动命令或其他密钥材料。
+
+服务在 stdin EOF、客户端断开或取消时走同一个有界 shutdown 路径，关闭全部 Shell 及其
+受管进程。当前 Windows 启动会明确失败并写入 stderr，不会注册一个无法保证完整后代清理的
+伪生产实现。
 
 ## 参与决策
 

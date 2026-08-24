@@ -141,11 +141,23 @@ class PosixProcessSupervisor:
         ControlIntent.KILL: "SIGKILL",
     }
 
-    def __init__(self, *, ownership_id_factory: Callable[[], str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ownership_id_factory: Callable[[], str] | None = None,
+        shutdown_grace_ms: int = 3000,
+    ) -> None:
+        if shutdown_grace_ms <= 0:
+            raise ValueError("shutdown_grace_ms must be positive")
         self._supervisor_token = object()
         self._ownership_id_factory = ownership_id_factory or (
             lambda: f"owner_{secrets.token_hex(16)}"
         )
+        self._shutdown_grace_ms = shutdown_grace_ms
+
+    @property
+    def shutdown_grace_ms(self) -> int:
+        return self._shutdown_grace_ms
 
     def prepare(self) -> ProcessOwnership:
         ownership_id = self._ownership_id_factory()
@@ -339,8 +351,7 @@ class PosixProcessSupervisor:
                 return self._incomplete_result(records, process_id)
 
             remaining = records
-            remaining_term_time = max(0.0, (deadline - time.monotonic()) / 2)
-            term_deadline = min(deadline, time.monotonic() + remaining_term_time)
+            term_deadline = self._term_deadline(deadline)
             remaining = self._wait_for_session(process_id, term_deadline, remaining)
             if self._outstanding_records(remaining, process_id):
                 remaining_groups = self._ordered_groups(
@@ -368,6 +379,15 @@ class PosixProcessSupervisor:
                 reaped=False,
                 remaining_managed_processes=count,
             )
+
+    def _term_deadline(self, hard_deadline: float) -> float:
+        now = time.monotonic()
+        remaining = max(0.0, hard_deadline - now)
+        grace_seconds = self._shutdown_grace_ms / 1000
+        # A partially consumed shared shutdown budget must still retain time for
+        # forced cleanup instead of spending the entire remainder on SIGTERM.
+        usable_grace = grace_seconds if remaining > grace_seconds else remaining / 2
+        return min(hard_deadline, now + usable_grace)
 
     def _ownership(self, ownership: ProcessOwnership) -> PosixProcessOwnership:
         if not isinstance(ownership, PosixProcessOwnership):
