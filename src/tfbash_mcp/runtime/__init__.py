@@ -56,6 +56,7 @@ from tfbash_mcp.runtime.errors import (
     TransportError,
     UnsupportedShell,
 )
+from tfbash_mcp.runtime.powershell import PowerShellDialect, PowerShellProtocol
 from tfbash_mcp.runtime.profile import (
     ManagedRuntimeSession,
     PosixBashProfile,
@@ -92,6 +93,7 @@ def __getattr__(name: str) -> Any:
     globals()[name] = value
     return value
 
+
 __all__ = [
     "STARTUP_COMMAND_UNSET",
     "AgentContext",
@@ -123,6 +125,8 @@ __all__ = [
     "PosixProcessOwnership",
     "PosixProcessSupervisor",
     "PosixSpawnOwnership",
+    "PowerShellDialect",
+    "PowerShellProtocol",
     "ProcessControlError",
     "ProcessOwnership",
     "ProcessSupervisor",
