@@ -15,6 +15,7 @@ on:
       - "tests/test_windows_lab.py"
       - "tests/test_windows_supervisor_lab.py"
       - "tests/test_server_config.py"
+      - "tests/test_mcp_stdio.py"
       - "src/tfbash_mcp/server.py"
       - "src/tfbash_mcp/runtime/**"
       - "pyproject.toml"
@@ -29,6 +30,7 @@ on:
       - "tests/test_windows_lab.py"
       - "tests/test_windows_supervisor_lab.py"
       - "tests/test_server_config.py"
+      - "tests/test_mcp_stdio.py"
       - "src/tfbash_mcp/server.py"
       - "src/tfbash_mcp/runtime/**"
       - "pyproject.toml"
@@ -150,6 +152,10 @@ jobs:
           }
           Write-Host "Supervisor smoke experiment exit code: $experimentExitCode"
           exit 0
+
+      - name: Run production Windows MCP stdio smoke
+        shell: pwsh
+        run: uv run --python 3.12.10 -- pytest tests/test_mcp_stdio.py -k production_windows_profile
 
       - name: Run hosted smoke matrix (1 repetition)
         shell: pwsh
