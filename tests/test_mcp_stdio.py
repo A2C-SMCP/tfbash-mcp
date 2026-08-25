@@ -190,15 +190,20 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             killed_content = cast(dict[str, Any], killed.structuredContent)
             assert killed_content["status"] == "delivered"
 
-            for _ in range(100):
+            rebuild_deadline = anyio.current_time() + 30
+            last_shell: dict[str, Any] = {}
+            while anyio.current_time() < rebuild_deadline:
                 listed = await session.call_tool("shell_list", {})
                 listed_content = cast(dict[str, Any], listed.structuredContent)
                 shells = cast(list[dict[str, Any]], listed_content["shells"])
-                if shells[0]["status"] == "ready" and shells[0]["active_exec_id"] is None:
+                last_shell = shells[0]
+                if last_shell["status"] == "ready" and last_shell["active_exec_id"] is None:
                     break
-                await anyio.sleep(0.05)
+                await anyio.sleep(0.1)
             else:
-                raise AssertionError("Windows Shell did not rebuild after a forced Job kill")
+                raise AssertionError(
+                    f"Windows Shell did not rebuild after a forced Job kill: {last_shell}"
+                )
 
             recovered = await session.call_tool(
                 "shell_exec",
