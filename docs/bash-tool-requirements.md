@@ -805,9 +805,9 @@ WindowsPwshProfile
 
 实验候选至少包含：A）pywinpty 3.0.5 + ConPTY + Toolhelp/process-creation identity + `taskkill`；B）同一 ConPTY transport + Windows Job Object 所有权与强制回收。Codex/DeepSeek 仅作为行为与分层参考，不作为第三个 Python 候选。
 
-关键门槛预先固定为：UTF-8/中文/emoji 字节结果完全一致；快速退出 sentinel 尾部 20/20 不丢失；interrupt 后 3 秒内恢复 prompt 或完成可观察重建；terminate/kill/close/shutdown 20/20 无受管子孙残留；每个 Execution 只产生一个终态且无跨 Execution 迟到输出。EOF 场景若任一 Profile 不能 20/20 在保留持久 Shell 的同时结束当前 stdin，则判定公共 `eof` 合同失败并在冻结前删除。
+正式 Windows release gate 已按实际生产风险收敛为：在一台新鲜 Windows 11 Client x64 上，针对待发布精确 source commit 执行 1 个完整 native session，并要求 UTF-8/中文/emoji、快速退出尾部、exit code、控制、可观察重建、Job 回收、唯一终态和无跨 Execution 迟到输出等全部 10 项强制检查通过，同时满足 `contract_passed=true`、`decision_ready=true`、`decision=pass`。若同 Shell recovery 失败，只有重建成功且 Job 内零残留才可通过。GitHub-hosted Windows 和额外 1–5 次重复只作持续诊断，不再把固定 20 次作为 release 判定前提。
 
-只有候选 Windows Profile 全部通过跨平台语义门槛，V1 字段合同才可冻结并进入完整实现。若 EOF 无法等价实现，应在冻结前从公共 schema 删除；若控制、退出码或进程所有权失败，则调整候选 transport/supervisor 或收紧 V1 明示范围，不能静默降级。
+精确源码 `098420b001952bf7592d3ad3da8c515b2f7429e7` 已在 run `supervisor-gate-20260825T044840Z-dfdb00fc` 通过 1/1 session、10/10 mandatory checks。候选 B（ConPTY + gated bootstrap + non-breakaway kill-on-close Job Object）因此进入 production profile；公共 `shell_write.eof` 因无法跨两个 Profile 等价兑现，已在 schema 冻结前删除。后续任何 production Windows runtime 变更都必须重新对新的精确 source commit 执行同一 release gate。
 
 ### 7.6 Codex：native Windows 与 IDE context 参考
 

@@ -1,9 +1,31 @@
 # Windows V1 Phase 0 experiment report
 
-Status: hardened hosted smoke complete and independently reviewed; native
-Windows 11 x64 gate pending.
+Status: native Windows 11 Client x64 release gate complete; decision `pass`.
 
-## Decision
+## Current decision
+
+Candidate B — pywinpty 3.0.5 / native ConPTY with gated bootstrap and a
+non-breakaway kill-on-close Job Object — is enabled as the production Windows
+V1 profile. The current formal gate is one complete session on a fresh Windows
+11 Client x64 against the exact source commit. All 10 mandatory checks must
+pass together with `contract_passed=true`, `decision_ready=true`, and
+`decision=pass`. Hosted Windows and optional 1–5 repetition runs are diagnostic
+smoke only; fixed 20-repetition evidence is no longer a release prerequisite.
+
+The latest formal evidence passed:
+
+- Source commit: `098420b001952bf7592d3ad3da8c515b2f7429e7`
+- Run: `supervisor-gate-20260825T044840Z-dfdb00fc`
+- Package SHA-256: `e8b5315df5d114d73503ae091a3437d6f9b9beb243287457f811eb570b5dc038`
+- Result ZIP SHA-256: `fd362ef66b76cfa7277350e00255a010f71ebb100b09fb3ae82758637fe3f7b0`
+- Result: `1/1` session, `10/10` mandatory checks, decision `pass`
+
+The public `shell_write.eof` field remains removed: a Windows-only candidate
+behavior is not a portable V1 input contract. Any later production Windows
+runtime change must rerun the same formal gate against its new exact source
+commit.
+
+## Historical hosted-smoke decision (superseded)
 
 The low-level pywinpty 3.0.5 / native ConPTY transport is a **hosted-smoke
 No-Go for the V1 shell contract**. The complete hosted matrix reproduced four
@@ -21,9 +43,8 @@ deadline in all 20 runs and required verified forced cleanup. Candidate B still
 has a documented spawn-to-assignment race because pywinpty exposes the shell
 PID only after spawn; production work must close or explicitly bound that gap.
 
-Issues #2, #13, #14, and #15 remain blocked until native evidence is returned.
-A complete Windows 11 failure is decision-ready No-Go evidence; an incomplete
-run is only inconclusive.
+At that point issues #2, #13, #14, and #15 were blocked pending native evidence.
+That blocking condition is now resolved by the formal evidence above.
 
 ## Reproducibility
 
@@ -82,7 +103,7 @@ string and converts it to UTF-8, so invalid UTF-8 byte sequences cannot be
 represented faithfully. Issue #2 must not freeze a raw-byte input contract
 against this transport without a byte-capable path.
 
-## Windows 11 x64 native handoff
+## Historical Windows 11 x64 native handoff (superseded)
 
 Execution package:
 `artifacts/handoff/windows-phase0-native-runner-61e36d3.zip`
@@ -103,15 +124,15 @@ the package into a new directory and run its top-level entry point:
 ./RUN_WINDOWS11.ps1
 ```
 
-The wrapper uses Python 3.12.10, pywinpty 3.0.5, `native-gate`, 20
-repetitions, and explicitly records the reviewed commit even though the ZIP has
-no `.git` directory. It uses `uv --no-project`, so the minimal experiment
-archive is not installed as the production package.
+This historical wrapper used Python 3.12.10, pywinpty 3.0.5, `native-gate`, 20
+repetitions, and explicitly recorded the reviewed commit even though the ZIP
+had no `.git` directory. It used `uv --no-project`, so the minimal experiment
+archive was not installed as the production package. It is retained for audit
+history and does not define the current gate.
 
-Return the complete `artifacts/windows-phase0-native` directory without
-editing it. The command returns zero only for Go. A nonzero exit is expected
-for a complete No-Go and must not prevent returning `environment.json`,
-`observations.jsonl`, `summary.json`, and `summary.md`.
+The old handoff requested the complete `artifacts/windows-phase0-native`
+directory and returned zero only for Go. It has been superseded by the
+SSH-first one-session supervisor gate described in the current decision.
 
 ## Superseded evidence
 

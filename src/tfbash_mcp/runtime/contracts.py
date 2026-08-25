@@ -186,6 +186,11 @@ class TransportWrite:
 @dataclass(frozen=True, slots=True)
 class ControlDelivery:
     delivered: bool
+    shell_rebuild_required: bool = False
+
+    def __post_init__(self) -> None:
+        if self.shell_rebuild_required and not self.delivered:
+            raise ValueError("an undelivered control cannot require Shell rebuild")
 
 
 @dataclass(frozen=True, slots=True)

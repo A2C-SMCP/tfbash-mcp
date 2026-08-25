@@ -439,6 +439,19 @@ def test_runtime_contract_rejects_ambiguous_read_and_event_values() -> None:
         DialectEvent(DialectEventKind.COMMAND_COMPLETE, correlation_id="id")
     with pytest.raises(ValueError):
         CleanupResult(reaped=True, remaining_managed_processes=1)
+    with pytest.raises(ValueError, match="undelivered"):
+        ControlDelivery(delivered=False, shell_rebuild_required=True)
+
+
+def test_control_delivery_reports_whether_the_shell_must_be_rebuilt() -> None:
+    assert ControlDelivery(delivered=True).shell_rebuild_required is False
+    assert (
+        ControlDelivery(
+            delivered=True,
+            shell_rebuild_required=True,
+        ).shell_rebuild_required
+        is True
+    )
 
 
 def test_runtime_boundary_has_no_platform_or_mcp_imports() -> None:

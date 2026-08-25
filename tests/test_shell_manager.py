@@ -411,7 +411,14 @@ class _Supervisor:
                 return ControlDelivery(delivered=False)
         if self.control_hook is not None:
             self.control_hook()
-        return ControlDelivery(delivered=self.control_delivered)
+        return ControlDelivery(
+            delivered=self.control_delivered,
+            shell_rebuild_required=(
+                self.control_delivered
+                and self.runtime_name is RuntimeName.WINDOWS_PWSH
+                and intent is ControlIntent.KILL
+            ),
+        )
 
     def is_alive(self, ownership: ProcessOwnership) -> bool:
         return True

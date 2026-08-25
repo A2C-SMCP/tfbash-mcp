@@ -484,7 +484,7 @@ class ShellWorker:
                     if not delivery.delivered:
                         raise ProcessControlError("semantic control was not delivered")
                     action.delivered = True
-                    rebuild_required = action.intent is ControlIntent.KILL
+                    rebuild_required = delivery.shell_rebuild_required
                     execution_expired = self._clock.monotonic_ms() >= execution_deadline_ms
             except Exception as error:
                 action.error = error
@@ -694,7 +694,7 @@ class ShellWorker:
                 if not delivery.delivered:
                     raise ProcessControlError("semantic control was not delivered")
                 action.delivered = True
-                rebuild_required = action.intent is ControlIntent.KILL
+                rebuild_required = delivery.shell_rebuild_required
             except Exception as error:
                 action.error = error
             finally:

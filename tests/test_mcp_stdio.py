@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -10,6 +11,67 @@ import anyio
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+
+
+async def _read_until_terminal(
+    session: ClientSession,
+    *,
+    shell_id: str,
+    exec_id: str,
+    timeout_seconds: float = 30,
+) -> dict[str, Any]:
+    cursor = 0
+    deadline = anyio.current_time() + timeout_seconds
+    last: dict[str, Any] = {}
+    while anyio.current_time() < deadline:
+        remaining_ms = max(1, int((deadline - anyio.current_time()) * 1000))
+        result = await session.call_tool(
+            "shell_read",
+            {
+                "shell_id": shell_id,
+                "exec_id": exec_id,
+                "cursor": cursor,
+                "wait_ms": min(5_000, remaining_ms),
+            },
+        )
+        last = cast(dict[str, Any], result.structuredContent)
+        cursor = cast(int, last["next_cursor"])
+        if last["status"] != "running":
+            return last
+    raise AssertionError(f"execution did not become terminal: {last}")
+
+
+async def _read_until_output(
+    session: ClientSession,
+    *,
+    shell_id: str,
+    exec_id: str,
+    expected: str,
+    timeout_seconds: float = 10,
+) -> dict[str, Any]:
+    cursor = 0
+    output = ""
+    deadline = anyio.current_time() + timeout_seconds
+    last: dict[str, Any] = {}
+    while anyio.current_time() < deadline:
+        remaining_ms = max(1, int((deadline - anyio.current_time()) * 1000))
+        result = await session.call_tool(
+            "shell_read",
+            {
+                "shell_id": shell_id,
+                "exec_id": exec_id,
+                "cursor": cursor,
+                "wait_ms": min(5_000, remaining_ms),
+            },
+        )
+        last = cast(dict[str, Any], result.structuredContent)
+        cursor = cast(int, last["next_cursor"])
+        output += cast(str, last["output"])
+        if expected in output:
+            return last
+        if last["status"] != "running":
+            break
+    raise AssertionError(f"execution did not produce {expected!r}: {last}")
 
 
 @pytest.mark.parametrize(
@@ -123,10 +185,137 @@ def test_cancelling_an_inflight_long_call_does_not_block_stdio_shutdown() -> Non
     anyio.run(scenario)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a native POSIX PTY")
+def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
+    async def scenario() -> None:
+        startup_command = "export TFBASH_STARTUP_REPLAY=ready"
+        inherited_secret = "inherited-without-agent-disclosure"
+        virtual_environment = str(Path.cwd() / ".test-venv")
+        inherited_path = f"{Path(virtual_environment) / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[
+                "-m",
+                "tfbash_mcp",
+                "--host-profile",
+                "ide",
+                "--workspace-root",
+                str(Path.cwd()),
+                "--environment-kind",
+                "python-venv",
+                "--environment-name",
+                "integration-venv",
+                "--startup-command",
+                startup_command,
+                "--close-timeout-ms",
+                "10000",
+            ],
+            env={
+                **os.environ,
+                "PATH": inherited_path,
+                "VIRTUAL_ENV": virtual_environment,
+                "TFBASH_ENV_SECRET": inherited_secret,
+            },
+            cwd=Path.cwd(),
+        )
+        async with (
+            stdio_client(parameters) as (read_stream, write_stream),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+            listed = await session.call_tool("shell_list", {})
+            context = cast(dict[str, Any], listed.structuredContent)
+            assert context["host"] == {
+                "mode": "ide",
+                "workspace_root": str(Path.cwd()),
+                "environment": {
+                    "kind": "python-venv",
+                    "name": "integration-venv",
+                },
+            }
+            visible = repr(context)
+            assert virtual_environment not in visible
+            assert inherited_secret not in visible
+            assert startup_command not in visible
+            assert sys.executable not in visible
+
+            opened = await session.call_tool("shell_open", {})
+            opened_content = cast(dict[str, Any], opened.structuredContent)
+            shell_id = cast(str, opened_content["shell_id"])
+            environment_probe = (
+                f'test "$PATH" = {shlex.quote(inherited_path)} '
+                '&& test -n "$VIRTUAL_ENV" '
+                '&& test "$TFBASH_ENV_SECRET" = "inherited-without-agent-disclosure" '
+                '&& test "$TFBASH_STARTUP_REPLAY" = "ready" '
+                "&& printf posix-host-ready"
+            )
+            first = await session.call_tool(
+                "shell_exec",
+                {"shell_id": shell_id, "command": environment_probe, "yield_ms": 5_000},
+            )
+            first_content = cast(dict[str, Any], first.structuredContent)
+            assert first_content["status"] == "exited"
+            assert first_content["exit_code"] == 0
+            assert first_content["output"] == "posix-host-ready"
+
+            # The streaming parser retains a possible result-marker suffix between reads.
+            control_ready = "control-ready-" + "x" * 128
+            running = await session.call_tool(
+                "shell_exec",
+                {
+                    "shell_id": shell_id,
+                    "command": f"printf {control_ready}; sleep 30",
+                    "yield_ms": 0,
+                    "timeout_ms": 30_000,
+                },
+            )
+            running_content = cast(dict[str, Any], running.structuredContent)
+            assert running_content["status"] == "running"
+            exec_id = cast(str, running_content["exec_id"])
+            await _read_until_output(
+                session,
+                shell_id=shell_id,
+                exec_id=exec_id,
+                expected="control-ready",
+            )
+            killed = await session.call_tool(
+                "shell_signal",
+                {"shell_id": shell_id, "exec_id": exec_id, "signal": "kill"},
+            )
+            assert cast(dict[str, Any], killed.structuredContent)["status"] == "delivered"
+            terminal_content = await _read_until_terminal(
+                session,
+                shell_id=shell_id,
+                exec_id=exec_id,
+            )
+            assert terminal_content["status"] == "exited"
+            assert terminal_content["shell_status"] == "ready"
+            assert terminal_content["shell_rebuilt"] is False
+
+            replayed = await session.call_tool(
+                "shell_exec",
+                {"shell_id": shell_id, "command": environment_probe, "yield_ms": 5_000},
+            )
+            replayed_content = cast(dict[str, Any], replayed.structuredContent)
+            assert replayed_content["status"] == "exited"
+            assert replayed_content["exit_code"] == 0
+            assert replayed_content["output"] == "posix-host-ready"
+
+            closed = await session.call_tool("shell_close", {"shell_id": shell_id})
+            assert cast(dict[str, Any], closed.structuredContent)["cleanup_complete"] is True
+
+    anyio.run(scenario)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows ConPTY")
 def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
     async def scenario() -> None:
         pwsh = os.environ["PHASE0_PWSH"]
+        startup_command = "$env:TFBASH_STARTUP_REPLAY='ready'"
+        inherited_secret = "inherited-without-agent-disclosure"
+        virtual_environment = str(Path.cwd() / ".test-venv")
+        inherited_path = f"{Path(virtual_environment) / 'Scripts'}{os.pathsep}{os.environ['PATH']}"
+        powershell_path_literal = inherited_path.replace("'", "''")
         parameters = StdioServerParameters(
             command=sys.executable,
             args=[
@@ -136,9 +325,25 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 "windows-pwsh",
                 "--shell",
                 pwsh,
+                "--host-profile",
+                "ide",
+                "--workspace-root",
+                str(Path.cwd()),
+                "--environment-kind",
+                "python-venv",
+                "--environment-name",
+                "integration-venv",
+                "--startup-command",
+                startup_command,
                 "--close-timeout-ms",
                 "10000",
             ],
+            env={
+                **os.environ,
+                "PATH": inherited_path,
+                "VIRTUAL_ENV": virtual_environment,
+                "TFBASH_ENV_SECRET": inherited_secret,
+            },
             cwd=Path.cwd(),
         )
         async with (
@@ -154,6 +359,19 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             assert context_result.isError is False
             assert context["runtime"]["platform"] == "windows"
             assert context["runtime"]["dialect"] == "pwsh"
+            assert context["host"] == {
+                "mode": "ide",
+                "workspace_root": str(Path.cwd()),
+                "environment": {
+                    "kind": "python-venv",
+                    "name": "integration-venv",
+                },
+            }
+            visible = repr(context)
+            assert virtual_environment not in visible
+            assert inherited_secret not in visible
+            assert startup_command not in visible
+            assert pwsh not in visible
 
             opened = await session.call_tool("shell_open", {})
             opened_content = cast(dict[str, Any], opened.structuredContent)
@@ -162,7 +380,14 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 "shell_exec",
                 {
                     "shell_id": shell_id,
-                    "command": 'cmd.exe /d /c "echo mcp-windows-e2e & exit /b 37"',
+                    "command": (
+                        f"if ($env:Path -eq '{powershell_path_literal}' -and "
+                        "$env:VIRTUAL_ENV -and "
+                        "$env:TFBASH_ENV_SECRET -eq 'inherited-without-agent-disclosure' -and "
+                        "$env:TFBASH_STARTUP_REPLAY -eq 'ready') { "
+                        'cmd.exe /d /c "echo mcp-windows-e2e & exit /b 37" '
+                        "} else { exit 91 }"
+                    ),
                     "yield_ms": 5_000,
                 },
             )
@@ -190,26 +415,23 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             killed_content = cast(dict[str, Any], killed.structuredContent)
             assert killed_content["status"] == "delivered"
 
-            rebuild_deadline = anyio.current_time() + 30
-            last_shell: dict[str, Any] = {}
-            while anyio.current_time() < rebuild_deadline:
-                listed = await session.call_tool("shell_list", {})
-                listed_content = cast(dict[str, Any], listed.structuredContent)
-                shells = cast(list[dict[str, Any]], listed_content["shells"])
-                last_shell = shells[0]
-                if last_shell["status"] == "ready" and last_shell["active_exec_id"] is None:
-                    break
-                await anyio.sleep(0.1)
-            else:
-                raise AssertionError(
-                    f"Windows Shell did not rebuild after a forced Job kill: {last_shell}"
-                )
+            terminal_content = await _read_until_terminal(
+                session,
+                shell_id=shell_id,
+                exec_id=exec_id,
+            )
+            assert terminal_content["status"] == "cancelled"
+            assert terminal_content["shell_status"] == "ready"
+            assert terminal_content["shell_rebuilt"] is True
 
             recovered = await session.call_tool(
                 "shell_exec",
                 {
                     "shell_id": shell_id,
-                    "command": "Write-Output mcp-windows-rebuilt",
+                    "command": (
+                        "if ($env:TFBASH_STARTUP_REPLAY -eq 'ready') { "
+                        "Write-Output mcp-windows-rebuilt } else { exit 91 }"
+                    ),
                     "yield_ms": 5_000,
                 },
             )

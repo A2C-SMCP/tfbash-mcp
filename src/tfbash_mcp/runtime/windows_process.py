@@ -591,7 +591,7 @@ class WindowsProcessSupervisor:
             self._check_control_deadline(deadline)
             concrete._api.terminate_job(concrete._require_job(), 1)
             concrete._job_termination_requested = True
-            return ControlDelivery(delivered=True)
+            return ControlDelivery(delivered=True, shell_rebuild_required=True)
 
     def is_alive(self, ownership: ProcessOwnership) -> bool:
         concrete = self._ownership(ownership)

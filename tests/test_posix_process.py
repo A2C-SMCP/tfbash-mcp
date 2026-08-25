@@ -217,13 +217,22 @@ def test_cleanup_reaps_running_stopped_stubborn_and_disowned_jobs(
         f"pathlib.Path({str(stubborn_ready)!r}).write_text('ready'); "
         "time.sleep(30)"
     )
+    stopped_ready = tmp_path / "stopped-ready"
+    stopped_script = (
+        "import os,pathlib,signal,time; "
+        f"pathlib.Path({str(stopped_ready)!r}).write_text('ready'); "
+        "os.kill(os.getpid(),signal.SIGSTOP); "
+        "time.sleep(30)"
+    )
     command = (
         f"{shlex.quote(sys.executable)} -c {shlex.quote(stubborn_script)} & disown; "
         "sleep 30 & disown; "
-        'sleep 30 & stopped=$!; kill -STOP "$stopped"; wait "$stopped" || true; '
-        f"for _ in {{1..200}}; do test -s {shlex.quote(str(stubborn_ready))} && break; "
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(stopped_script)} & disown; "
+        f"for _ in {{1..200}}; do test -s {shlex.quote(str(stubborn_ready))} "
+        f"&& test -s {shlex.quote(str(stopped_ready))} && break; "
         "sleep 0.01; done; "
-        f"test -s {shlex.quote(str(stubborn_ready))}"
+        f"test -s {shlex.quote(str(stubborn_ready))} "
+        f"&& test -s {shlex.quote(str(stopped_ready))}"
     )
     try:
         assert _execute(runtime, command).exit_code == 0

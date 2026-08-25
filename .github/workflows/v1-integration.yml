@@ -1,0 +1,119 @@
+name: V1 Integration Matrix
+
+on:
+  push:
+    branches:
+      - main
+      - feature/issue-11-integration-matrix
+    paths:
+      - ".github/workflows/v1-integration.yml"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/v1-integration.yml"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  posix-native:
+    name: ${{ matrix.platform }} native PTY
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            runner: ubuntu-24.04
+          - platform: macOS
+            runner: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          version: "0.8.17"
+          python-version: "3.12.10"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups --python 3.12.10
+
+      - name: Run shared and native POSIX integration contracts
+        run: |
+          uv run --python 3.12.10 pytest \
+            tests/test_protocol.py \
+            tests/test_runtime_config.py \
+            tests/test_package.py \
+            tests/test_mcp_adapter.py \
+            tests/test_server_config.py \
+            tests/test_runtime_contracts.py \
+            tests/test_bash_dialect.py \
+            tests/test_posix_pty.py \
+            tests/test_posix_process.py \
+            tests/test_shell_manager.py \
+            tests/test_mcp_stdio.py
+
+  windows-native:
+    name: Windows hosted native ConPTY
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          version: "0.8.17"
+          python-version: "3.12.10"
+
+      - name: Install pinned PowerShell
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "PowerShell-7.6.3-win-x64.zip"
+          $install = Join-Path $env:RUNNER_TEMP "PowerShell-7.6.3"
+          $uri = "https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/PowerShell-7.6.3-win-x64.zip"
+          $expected = "07DDB0D00B660459560EF82A9841DA7705B27CD5DCCA5A0D7B025A98ECA29ECA"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash
+          if ($actual -ne $expected) {
+            throw "PowerShell archive checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $install
+          "PHASE0_PWSH=$(Join-Path $install 'pwsh.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups --python 3.12.10
+
+      - name: Run shared and native Windows integration contracts
+        shell: pwsh
+        run: |
+          uv run --python 3.12.10 pytest `
+            tests/test_protocol.py `
+            tests/test_runtime_config.py `
+            tests/test_package.py `
+            tests/test_mcp_adapter.py `
+            tests/test_server_config.py `
+            tests/test_runtime_contracts.py `
+            tests/test_powershell_dialect.py `
+            tests/test_windows_bootstrap.py `
+            tests/test_windows_conpty.py `
+            tests/test_windows_process.py `
+            tests/test_windows_win32.py `
+            tests/test_shell_manager.py `
+            tests/test_mcp_stdio.py

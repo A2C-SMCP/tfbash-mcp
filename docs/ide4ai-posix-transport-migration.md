@@ -13,4 +13,4 @@
 | `_rebuild_shell()` / `close(force=True)` | transport `close()` + #7 supervisor cleanup | transport 只关闭 PTY master；进程组 terminate/kill/reap 不由 pexpect 或 transport 越权执行。 |
 | `test_stream_io.py` 的 high-fd `use_poll` 回归 | `tests/test_posix_pty.py` wait/read 集成 | 保留 poll 而非 `select.select()` 的架构约束，并增加 tail drain、partial write/backpressure、single-reader、异常/幂等关闭。 |
 
-公共 `shell_write.eof` 已按 #2 的保守合同移除，且 #12 native Windows 证据仍待回传，因此本 adapter 不新增 POSIX-only VEOF port；这里的 EOF 仅表示 PTY output 端关闭。
+公共 `shell_write.eof` 已按 #2 的保守合同移除，因此本 adapter 不新增 POSIX-only VEOF port；这里的 EOF 仅表示 PTY output 端关闭。#12 的 Windows 11 Client x64 native gate 已在精确源码 `098420b001952bf7592d3ad3da8c515b2f7429e7` 上以 1/1 session、10/10 mandatory checks 和 decision `pass` 完成，证实 production Windows Profile 的控制、重建与 Job 回收路径，但不恢复无法跨平台等价的公共 EOF 输入语义。
