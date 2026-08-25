@@ -148,6 +148,60 @@ def _protocol_command(
     return bytes(output), exit_code
 
 
+def _begin_protocol_command(
+    transport: Any,
+    session: Any,
+    protocol: Any,
+    command: str,
+    marker: bytes,
+    deadline: float,
+) -> str:
+    from tfbash_mcp.runtime import DialectEventKind, ReadStatus, WaitInterest
+
+    frame = protocol.wrap_command(command)
+    _write_all(transport, session, frame.input_bytes, deadline)
+    output = bytearray()
+    while time.monotonic() < deadline:
+        transport.wait(session, frozenset({WaitInterest.READABLE}), 50)
+        result = transport.read(session, 65_536)
+        if result.status is ReadStatus.EOF:
+            raise ProbeError("PowerShell exited before the interrupt target started")
+        if result.status is not ReadStatus.DATA:
+            continue
+        for event in protocol.feed(result.data):
+            if event.kind is DialectEventKind.OUTPUT:
+                output.extend(event.data)
+        if marker in output:
+            return frame.correlation_id
+    raise ProbeError("PowerShell interrupt target did not produce its start marker")
+
+
+def _recover_protocol_command(
+    transport: Any,
+    session: Any,
+    protocol: Any,
+    correlation_id: str,
+    deadline: float,
+) -> bool:
+    from tfbash_mcp.runtime import DialectEventKind, ReadStatus, WaitInterest
+
+    recovery = protocol.recovery_input()
+    _write_all(transport, session, recovery, deadline)
+    while time.monotonic() < deadline:
+        transport.wait(session, frozenset({WaitInterest.READABLE}), 50)
+        result = transport.read(session, 65_536)
+        if result.status is ReadStatus.EOF:
+            raise ProbeError("PowerShell exited before protocol recovery")
+        if result.status is not ReadStatus.DATA:
+            continue
+        if any(
+            event.kind is DialectEventKind.RECOVERED and event.correlation_id == correlation_id
+            for event in protocol.feed(result.data)
+        ):
+            return True
+    raise ProbeError("PowerShell protocol recovery deadline expired")
+
+
 def _job_ids(ownership: Any) -> tuple[int, ...]:
     job = ownership._job
     if job is None:
@@ -280,36 +334,27 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
         checks["shell_survived_execution_cleanup"] = supervisor.is_alive(ownership)
 
         interrupt_start = f"TFBASH_INTERRUPT_START_{iteration}"
-        interrupt_recovered = f"TFBASH_INTERRUPT_RECOVERED_{iteration}"
         interrupt_command = (
             f"{_write_marker_script(interrupt_start)};"
-            "Start-Sleep -Seconds 60;[Console]::Out.WriteLine('INTERRUPT_MISSED')\r\n"
+            "Start-Sleep -Seconds 60;[Console]::Out.WriteLine('INTERRUPT_MISSED')"
         )
-        _write_all(
+        correlation_id = _begin_protocol_command(
             transport,
             managed.session,
-            interrupt_command.encode(),
-            time.monotonic() + 5,
-        )
-        _read_until(
-            transport,
-            managed.session,
-            lambda value: interrupt_start.encode() in value,
-            deadline=time.monotonic() + 5,
+            plan.protocol,
+            interrupt_command,
+            interrupt_start.encode(),
+            time.monotonic() + 10,
         )
         delivery = supervisor.control(ownership, ControlIntent.INTERRUPT, deadline_ms=2_000)
         checks["interrupt_delivered"] = delivery.delivered
-        recovery_command = f"{_write_marker_script(interrupt_recovered)}\r\n".encode()
-        _write_all(transport, managed.session, recovery_command, time.monotonic() + 5)
-        recovered_output = _read_until(
+        checks["shell_recovered_after_interrupt"] = _recover_protocol_command(
             transport,
             managed.session,
-            lambda value: interrupt_recovered.encode() in value,
-            deadline=time.monotonic() + 10,
-        )
-        checks["shell_recovered_after_interrupt"] = (
-            interrupt_recovered.encode() in recovered_output and supervisor.is_alive(ownership)
-        )
+            plan.protocol,
+            correlation_id,
+            time.monotonic() + 10,
+        ) and supervisor.is_alive(ownership)
 
         tail_marker = f"TFBASH_TAIL_{iteration}".encode()
         tail_output, exit_code = _protocol_command(
