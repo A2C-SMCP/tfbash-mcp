@@ -807,7 +807,7 @@ WindowsPwshProfile
 
 正式 Windows release gate 已按实际生产风险收敛为：在一台新鲜 Windows 11 Client x64 上，针对待发布精确 source commit 执行 1 个完整 native session，并要求 UTF-8/中文/emoji、快速退出尾部、exit code、控制、可观察重建、Job 回收、唯一终态和无跨 Execution 迟到输出等全部 10 项强制检查通过，同时满足 `contract_passed=true`、`decision_ready=true`、`decision=pass`。若同 Shell recovery 失败，只有重建成功且 Job 内零残留才可通过。GitHub-hosted Windows 和额外 1–5 次重复只作持续诊断，不再把固定 20 次作为 release 判定前提。
 
-精确源码 `098420b001952bf7592d3ad3da8c515b2f7429e7` 已在 run `supervisor-gate-20260825T044840Z-dfdb00fc` 通过 1/1 session、10/10 mandatory checks。候选 B（ConPTY + gated bootstrap + non-breakaway kill-on-close Job Object）因此进入 production profile；公共 `shell_write.eof` 因无法跨两个 Profile 等价兑现，已在 schema 冻结前删除。后续任何 production Windows runtime 变更都必须重新对新的精确 source commit 执行同一 release gate。
+精确源码 `8e0626536aa1509d5919b1c1cb1a674438f21027` 已在 run `supervisor-gate-20260825T093244Z-0ed74ef3` 通过 1/1 session、10/10 mandatory checks。候选 B（ConPTY + gated bootstrap + non-breakaway kill-on-close Job Object）因此进入 production profile；公共 `shell_write.eof` 因无法跨两个 Profile 等价兑现，已在 schema 冻结前删除。后续任何 production Windows runtime 变更都必须重新对新的精确 source commit 执行同一 release gate。
 
 ### 7.6 Codex：native Windows 与 IDE context 参考
 
