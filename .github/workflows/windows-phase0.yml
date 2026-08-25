@@ -14,6 +14,8 @@ on:
       - "scripts/windows_supervisor_lab.py"
       - "tests/test_windows_lab.py"
       - "tests/test_windows_supervisor_lab.py"
+      - "tests/test_server_config.py"
+      - "src/tfbash_mcp/server.py"
       - "src/tfbash_mcp/runtime/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -26,6 +28,8 @@ on:
       - "scripts/windows_supervisor_lab.py"
       - "tests/test_windows_lab.py"
       - "tests/test_windows_supervisor_lab.py"
+      - "tests/test_server_config.py"
+      - "src/tfbash_mcp/server.py"
       - "src/tfbash_mcp/runtime/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -55,9 +59,9 @@ jobs:
 
       - name: Validate controller
         run: |
-          uv run --group windows-lab ruff check experiments/windows_phase0/lab.py experiments/windows_supervisor_native scripts/windows_lab.py scripts/windows_supervisor_lab.py tests/test_windows_lab.py tests/test_windows_supervisor_lab.py
+          uv run --group windows-lab ruff check experiments/windows_phase0/lab.py experiments/windows_supervisor_native scripts/windows_lab.py scripts/windows_supervisor_lab.py src/tfbash_mcp/server.py tests/test_windows_lab.py tests/test_windows_supervisor_lab.py tests/test_server_config.py
           uv run --group windows-lab mypy
-          uv run --group windows-lab python -m pytest tests/test_windows_lab.py tests/test_windows_supervisor_lab.py
+          uv run --group windows-lab python -m pytest tests/test_windows_lab.py tests/test_windows_supervisor_lab.py tests/test_server_config.py
 
   hosted-smoke:
     name: Hosted Windows smoke

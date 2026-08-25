@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from threading import Event
@@ -9,6 +10,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
+import tfbash_mcp.server as server_module
 from tfbash_mcp.domain import (
     CommandShellManager,
     ExecutionSnapshot,
@@ -18,10 +20,17 @@ from tfbash_mcp.domain import (
 )
 from tfbash_mcp.mcp_adapter import ToolConcurrencyLimits
 from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_contract_schemas
-from tfbash_mcp.runtime import PosixProcessSupervisor, RuntimeConfigurationError
+from tfbash_mcp.runtime import (
+    ConPtyTransport,
+    PosixProcessSupervisor,
+    PowerShellDialect,
+    RuntimeConfigurationError,
+    WindowsProcessSupervisor,
+    WindowsPwshProfile,
+)
 from tfbash_mcp.server import (
-    _blocked_windows_runtime,
     _build_posix_runtime,
+    _build_windows_runtime,
     _create_tool_limiters,
     _probe_shell_version,
     _redact_sensitive_schema_defaults,
@@ -68,9 +77,53 @@ def test_ide_host_requires_an_explicit_workspace_root() -> None:
         )
 
 
-def test_windows_runtime_remains_fail_closed_until_issue_15() -> None:
-    with pytest.raises(RuntimeConfigurationError, match="atomic spawn-to-Job"):
-        _blocked_windows_runtime()
+def test_windows_runtime_composes_the_native_profile_after_issue_15_gate() -> None:
+    runtime = _build_windows_runtime(
+        shutdown_grace_ms=1234,
+        close_timeout_ms=5000,
+        shell_startup_timeout_ms=6789,
+        max_read_buffer_bytes=123_456,
+        max_write_buffer_bytes=65_432,
+    )
+
+    assert isinstance(runtime, WindowsPwshProfile)
+    assert isinstance(runtime.dialect, PowerShellDialect)
+    assert isinstance(runtime.transport, ConPtyTransport)
+    assert isinstance(runtime.supervisor, WindowsProcessSupervisor)
+    assert runtime.transport._max_read_buffer_bytes == 123_456
+    assert runtime.transport._max_write_buffer_bytes == 65_432
+    assert runtime.transport._close_timeout_ms == 5000
+    assert runtime.supervisor._terminate_grace_ms == 1234
+    assert runtime.supervisor._attach_cleanup_timeout_ms == 5000
+    assert runtime.supervisor._gate_wait_timeout_ms == 6789
+    assert runtime.supervisor._shell_ready_timeout_ms == 6789
+
+
+def test_build_service_selects_the_production_windows_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os.path, "isdir", lambda _path: True)
+    monkeypatch.setattr(server_module, "_probe_shell_version", lambda *args, **kwargs: "7.6.3")
+    arguments = build_parser().parse_args(
+        [
+            "--runtime-profile",
+            "windows-pwsh",
+            "--shell",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ]
+    )
+
+    service = build_service(
+        arguments,
+        operating_system="Windows",
+        process_cwd=r"C:\workspace",
+        inherited_environment={"Path": r"C:\Windows\System32"},
+    )
+
+    manager = cast(CommandShellManager, service._manager)
+    assert isinstance(manager._profile, WindowsPwshProfile)
+    assert service._composition.host.runtime_profile.value == "windows-pwsh"
+    service.shutdown()
 
 
 def test_shell_version_probe_reports_a_redacted_configuration_error() -> None:
