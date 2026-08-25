@@ -194,8 +194,10 @@ def _process_is_dead(ownership: Any, process_id: int) -> bool:
     process = ownership._api.open_process_if_alive(process_id)
     if process is None:
         return True
-    ownership._api.close_process(process)
-    return False
+    try:
+        return not bool(ownership._api.process_is_alive(process))
+    finally:
+        ownership._api.close_process(process)
 
 
 def _powershell_literal(value: str) -> str:
