@@ -681,6 +681,35 @@ def test_shell_cleanup_terminates_job_closes_handles_and_is_idempotent() -> None
     assert supervisor.cleanup(ownership, deadline_ms=0).reaped
 
 
+def test_shell_cleanup_waits_for_asynchronous_job_termination_without_rekilling_root() -> None:
+    class AsynchronousJobApi(_FakeApi):
+        def terminate_job(self, job: object, exit_code: int) -> None:
+            assert exit_code == 1
+            self.terminated_jobs.append(cast(int, job))
+
+        def job_process_ids(
+            self,
+            job: object,
+            *,
+            deadline: float | None = None,
+        ) -> tuple[int, ...]:
+            if self.terminated_jobs:
+                for process in self.processes.values():
+                    if process.job == job:
+                        process.alive = False
+            return super().job_process_ids(job, deadline=deadline)
+
+        def terminate_process(self, process: WindowsProcessHandle, exit_code: int) -> None:
+            if self.terminated_jobs and process.identity.process_id == 100:
+                raise AssertionError("Job-owned root must not be terminated a second time")
+            super().terminate_process(process, exit_code)
+
+    supervisor, ownership, api = _attached(api=AsynchronousJobApi())
+
+    assert supervisor.cleanup(ownership, deadline_ms=100).reaped
+    assert api.terminated_jobs == [1]
+
+
 def test_zero_deadline_and_stuck_job_retain_ownership_for_retry() -> None:
     supervisor, ownership, api = _attached()
     api.add_process(200, parent_id=100)

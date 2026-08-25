@@ -690,10 +690,11 @@ class WindowsProcessSupervisor:
                     self._finalize(concrete)
                     return CleanupResult(reaped=True, remaining_managed_processes=0)
                 self._retry_pending_closes(concrete)
-                if self._job_process_ids(concrete, deadline=deadline):
+                job_has_processes = bool(self._job_process_ids(concrete, deadline=deadline))
+                if job_has_processes:
                     concrete._api.terminate_job(job, 1)
                     self._check_deadline(deadline)
-                if concrete._api.process_is_alive(root):
+                elif concrete._api.process_is_alive(root):
                     concrete._api.terminate_process(root, 1)
                     self._check_deadline(deadline)
                 while True:
