@@ -45,35 +45,6 @@ def _write_all(transport: Any, session: Any, payload: bytes, deadline: float) ->
             transport.wait(session, frozenset({WaitInterest.WRITABLE}), 50)
 
 
-def _read_until(
-    transport: Any,
-    session: Any,
-    predicate: Any,
-    *,
-    deadline: float,
-) -> bytes:
-    from tfbash_mcp.runtime import ReadStatus, WaitInterest
-
-    output = bytearray()
-    while time.monotonic() < deadline:
-        transport.wait(
-            session,
-            frozenset({WaitInterest.READABLE, WaitInterest.PROCESS_EXIT}),
-            50,
-        )
-        while True:
-            result = transport.read(session, 65_536)
-            if result.status is ReadStatus.DATA:
-                output.extend(result.data)
-                if predicate(bytes(output)):
-                    return bytes(output)
-                continue
-            if result.status is ReadStatus.EOF:
-                raise ProbeError("ConPTY reached EOF before the expected evidence marker")
-            break
-    raise ProbeError("ConPTY read deadline expired")
-
-
 def _await_ready(transport: Any, session: Any, plan: Any, deadline: float) -> None:
     from tfbash_mcp.runtime import DialectEventKind
 
@@ -310,15 +281,16 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
         )
         command = (
             f"& {_powershell_literal(pwsh)} -NoLogo -NoProfile "
-            f"-EncodedCommand {_encoded(child_script)}\r\n"
+            f"-EncodedCommand {_encoded(child_script)}"
         )
-        _write_all(transport, managed.session, command.encode(), time.monotonic() + 5)
-        child_output = _read_until(
+        child_output, child_exit_code = _protocol_command(
             transport,
             managed.session,
-            lambda value: _PID_PATTERN.search(value) is not None,
-            deadline=time.monotonic() + 10,
+            plan.protocol,
+            command,
+            time.monotonic() + 10,
         )
+        diagnostics["child_exit_code"] = child_exit_code
         match = _PID_PATTERN.search(child_output)
         if match is None:
             raise ProbeError("grandchild PID marker was not observed")
