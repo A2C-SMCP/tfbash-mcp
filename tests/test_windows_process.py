@@ -600,6 +600,46 @@ def test_execution_cleanup_reaps_new_descendants_and_preserves_shell() -> None:
     assert supervisor.is_alive(ownership)
 
 
+def test_execution_cleanup_preserves_identity_fenced_conpty_infrastructure() -> None:
+    api = _FakeApi()
+    infrastructure: list[_Process] = []
+
+    def create_infrastructure() -> None:
+        infrastructure.append(api.add_process(150, parent_id=99))
+
+    api.signal_hook = create_infrastructure
+    supervisor, ownership, api = _attached(api=api)
+    descendant = api.add_process(200, parent_id=100)
+
+    result = supervisor.cleanup_execution(ownership, deadline_ms=100)
+
+    assert result.reaped
+    assert infrastructure[0].alive
+    assert not descendant.alive
+    assert WindowsProcessIdentity(150, infrastructure[0].created) in ownership._infrastructure
+
+
+def test_reused_infrastructure_pid_does_not_escape_execution_cleanup() -> None:
+    api = _FakeApi()
+    infrastructure: list[_Process] = []
+
+    def create_infrastructure() -> None:
+        infrastructure.append(api.add_process(150, parent_id=99))
+
+    api.signal_hook = create_infrastructure
+    supervisor, ownership, api = _attached(api=api)
+    original_identity = WindowsProcessIdentity(150, infrastructure[0].created)
+    infrastructure[0].alive = False
+    replacement = api.add_process(150, parent_id=100)
+
+    result = supervisor.cleanup_execution(ownership, deadline_ms=100)
+
+    assert result.reaped
+    assert not replacement.alive
+    assert WindowsProcessIdentity(150, replacement.created) in api.terminated_processes
+    assert original_identity not in api.terminated_processes
+
+
 def test_execution_cleanup_never_crosses_job_boundary_for_an_escaped_descendant() -> None:
     supervisor, ownership, api = _attached()
     escaped = api.add_process(200, parent_id=100)
