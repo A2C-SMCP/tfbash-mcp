@@ -3,7 +3,15 @@
 
 from __future__ import annotations
 
-from experiments.windows_supervisor_native.lab import main
+import sys
+from collections.abc import Callable
+from importlib import import_module
+from pathlib import Path
+from typing import cast
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 if __name__ == "__main__":
+    module = import_module("experiments.windows_supervisor_native.lab")
+    main = cast(Callable[[], int], module.main)
     raise SystemExit(main())
