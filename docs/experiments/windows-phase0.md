@@ -14,10 +14,10 @@ smoke only; fixed 20-repetition evidence is no longer a release prerequisite.
 
 The latest formal evidence passed:
 
-- Source commit: `098420b001952bf7592d3ad3da8c515b2f7429e7`
-- Run: `supervisor-gate-20260825T044840Z-dfdb00fc`
-- Package SHA-256: `e8b5315df5d114d73503ae091a3437d6f9b9beb243287457f811eb570b5dc038`
-- Result ZIP SHA-256: `fd362ef66b76cfa7277350e00255a010f71ebb100b09fb3ae82758637fe3f7b0`
+- Source commit: `8e0626536aa1509d5919b1c1cb1a674438f21027`
+- Run: `supervisor-gate-20260825T093244Z-0ed74ef3`
+- Package SHA-256: `7fb031328e73f58f2f1e8520c377463d1cb21d9bc579bfde0d1d3fd63b1a6af7`
+- Result ZIP SHA-256: `887dfcef8e5dad80d9404bbe7a98931e509cebde9f1e3fd35960862827f07ace`
 - Result: `1/1` session, `10/10` mandatory checks, decision `pass`
 
 The public `shell_write.eof` field remains removed: a Windows-only candidate
