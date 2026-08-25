@@ -74,6 +74,15 @@ def _native_default_shell() -> str:
     return _default_shell(_default_platform())
 
 
+def _is_native_absolute_path(value: str, platform: PlatformName) -> bool:
+    if platform is PlatformName.WINDOWS:
+        normalized = value.replace("/", "\\")
+        if normalized.startswith("\\\\.\\"):
+            return False
+        return PureWindowsPath(value).is_absolute()
+    return PurePosixPath(value).is_absolute()
+
+
 @dataclass(frozen=True, slots=True)
 class ProtocolConfig:
     """Runtime facts and limits needed to resolve and validate wire values."""
@@ -104,11 +113,8 @@ class ProtocolConfig:
             raise ValueError("command_yield_ms must be between 0 and 60000")
         if not 1 <= self.command_timeout_ms <= 86_400_000:
             raise ValueError("command_timeout_ms must be between 1 and 86400000")
-        path_type = (
-            PureWindowsPath if self.platform is PlatformName.WINDOWS else PurePosixPath
-        )
         for name, value in (("default_cwd", self.default_cwd), ("shell", self.shell)):
-            if "\x00" in value or not path_type(value).is_absolute():
+            if "\x00" in value or not _is_native_absolute_path(value, self.platform):
                 raise ValueError(f"{name} must be an absolute {self.platform.value} path")
         if self.startup_command is not None:
             if not self.startup_command or "\x00" in self.startup_command:
@@ -172,8 +178,7 @@ def _identifier(value: str) -> str:
 def _native_absolute_path(value: str, info: ValidationInfo) -> str:
     _without_nul(value)
     platform = _protocol_config(info).platform
-    path = PureWindowsPath(value) if platform is PlatformName.WINDOWS else PurePosixPath(value)
-    if not path.is_absolute():
+    if not _is_native_absolute_path(value, platform):
         raise ValueError(f"must be an absolute {platform.value} path")
     return value
 
@@ -219,8 +224,7 @@ def _env_key(value: str) -> str:
     if not first_is_valid:
         raise ValueError("must match [A-Za-z_][A-Za-z0-9_]*")
     if not all(
-        character.isascii() and (character.isalnum() or character == "_")
-        for character in value[1:]
+        character.isascii() and (character.isalnum() or character == "_") for character in value[1:]
     ):
         raise ValueError("must match [A-Za-z_][A-Za-z0-9_]*")
     return value
@@ -536,76 +540,80 @@ class ErrorCode(str, Enum):
     RESOURCE_LIMIT = "resource_limit"
 
 
-RETRYABLE_BY_CODE: Mapping[ErrorCode, bool | None] = MappingProxyType({
-    ErrorCode.INVALID_ARGUMENT: False,
-    ErrorCode.INVALID_CURSOR: False,
-    ErrorCode.UNSUPPORTED_SHELL: False,
-    ErrorCode.SHELL_START_FAILED: False,
-    ErrorCode.SHELL_NOT_FOUND: False,
-    ErrorCode.SHELL_BUSY: True,
-    ErrorCode.SHELL_CLOSING: False,
-    ErrorCode.SHELL_UNAVAILABLE: None,
-    ErrorCode.EXEC_NOT_FOUND: False,
-    ErrorCode.EXEC_NOT_ACTIVE: False,
-    ErrorCode.RESOURCE_LIMIT: True,
-})
+RETRYABLE_BY_CODE: Mapping[ErrorCode, bool | None] = MappingProxyType(
+    {
+        ErrorCode.INVALID_ARGUMENT: False,
+        ErrorCode.INVALID_CURSOR: False,
+        ErrorCode.UNSUPPORTED_SHELL: False,
+        ErrorCode.SHELL_START_FAILED: False,
+        ErrorCode.SHELL_NOT_FOUND: False,
+        ErrorCode.SHELL_BUSY: True,
+        ErrorCode.SHELL_CLOSING: False,
+        ErrorCode.SHELL_UNAVAILABLE: None,
+        ErrorCode.EXEC_NOT_FOUND: False,
+        ErrorCode.EXEC_NOT_ACTIVE: False,
+        ErrorCode.RESOURCE_LIMIT: True,
+    }
+)
 
 
-ERROR_CODES_BY_TOOL: Mapping[ToolName, frozenset[ErrorCode]] = MappingProxyType({
-    ToolName.SHELL_OPEN: frozenset(
-        {
-            ErrorCode.INVALID_ARGUMENT,
-            ErrorCode.UNSUPPORTED_SHELL,
-            ErrorCode.SHELL_START_FAILED,
-            ErrorCode.RESOURCE_LIMIT,
-        }
-    ),
-    ToolName.SHELL_LIST: frozenset({ErrorCode.INVALID_ARGUMENT}),
-    ToolName.SHELL_CLOSE: frozenset(
-        {ErrorCode.INVALID_ARGUMENT, ErrorCode.SHELL_NOT_FOUND, ErrorCode.SHELL_CLOSING}
-    ),
-    ToolName.SHELL_EXEC: frozenset(
-        {
-            ErrorCode.INVALID_ARGUMENT,
-            ErrorCode.SHELL_NOT_FOUND,
-            ErrorCode.SHELL_BUSY,
-            ErrorCode.SHELL_CLOSING,
-            ErrorCode.SHELL_UNAVAILABLE,
-        }
-    ),
-    ToolName.SHELL_READ: frozenset(
-        {
-            ErrorCode.INVALID_ARGUMENT,
-            ErrorCode.INVALID_CURSOR,
-            ErrorCode.SHELL_NOT_FOUND,
-            ErrorCode.SHELL_CLOSING,
-            ErrorCode.EXEC_NOT_FOUND,
-            ErrorCode.RESOURCE_LIMIT,
-        }
-    ),
-    ToolName.SHELL_WRITE: frozenset(
-        {
-            ErrorCode.INVALID_ARGUMENT,
-            ErrorCode.SHELL_NOT_FOUND,
-            ErrorCode.SHELL_CLOSING,
-            ErrorCode.SHELL_UNAVAILABLE,
-            ErrorCode.EXEC_NOT_FOUND,
-            ErrorCode.EXEC_NOT_ACTIVE,
-            ErrorCode.RESOURCE_LIMIT,
-        }
-    ),
-    ToolName.SHELL_SIGNAL: frozenset(
-        {
-            ErrorCode.INVALID_ARGUMENT,
-            ErrorCode.SHELL_NOT_FOUND,
-            ErrorCode.SHELL_CLOSING,
-            ErrorCode.SHELL_UNAVAILABLE,
-            ErrorCode.EXEC_NOT_FOUND,
-            ErrorCode.EXEC_NOT_ACTIVE,
-            ErrorCode.RESOURCE_LIMIT,
-        }
-    ),
-})
+ERROR_CODES_BY_TOOL: Mapping[ToolName, frozenset[ErrorCode]] = MappingProxyType(
+    {
+        ToolName.SHELL_OPEN: frozenset(
+            {
+                ErrorCode.INVALID_ARGUMENT,
+                ErrorCode.UNSUPPORTED_SHELL,
+                ErrorCode.SHELL_START_FAILED,
+                ErrorCode.RESOURCE_LIMIT,
+            }
+        ),
+        ToolName.SHELL_LIST: frozenset({ErrorCode.INVALID_ARGUMENT}),
+        ToolName.SHELL_CLOSE: frozenset(
+            {ErrorCode.INVALID_ARGUMENT, ErrorCode.SHELL_NOT_FOUND, ErrorCode.SHELL_CLOSING}
+        ),
+        ToolName.SHELL_EXEC: frozenset(
+            {
+                ErrorCode.INVALID_ARGUMENT,
+                ErrorCode.SHELL_NOT_FOUND,
+                ErrorCode.SHELL_BUSY,
+                ErrorCode.SHELL_CLOSING,
+                ErrorCode.SHELL_UNAVAILABLE,
+            }
+        ),
+        ToolName.SHELL_READ: frozenset(
+            {
+                ErrorCode.INVALID_ARGUMENT,
+                ErrorCode.INVALID_CURSOR,
+                ErrorCode.SHELL_NOT_FOUND,
+                ErrorCode.SHELL_CLOSING,
+                ErrorCode.EXEC_NOT_FOUND,
+                ErrorCode.RESOURCE_LIMIT,
+            }
+        ),
+        ToolName.SHELL_WRITE: frozenset(
+            {
+                ErrorCode.INVALID_ARGUMENT,
+                ErrorCode.SHELL_NOT_FOUND,
+                ErrorCode.SHELL_CLOSING,
+                ErrorCode.SHELL_UNAVAILABLE,
+                ErrorCode.EXEC_NOT_FOUND,
+                ErrorCode.EXEC_NOT_ACTIVE,
+                ErrorCode.RESOURCE_LIMIT,
+            }
+        ),
+        ToolName.SHELL_SIGNAL: frozenset(
+            {
+                ErrorCode.INVALID_ARGUMENT,
+                ErrorCode.SHELL_NOT_FOUND,
+                ErrorCode.SHELL_CLOSING,
+                ErrorCode.SHELL_UNAVAILABLE,
+                ErrorCode.EXEC_NOT_FOUND,
+                ErrorCode.EXEC_NOT_ACTIVE,
+                ErrorCode.RESOURCE_LIMIT,
+            }
+        ),
+    }
+)
 
 
 class ErrorDetails(_StrictModel):
@@ -845,8 +853,12 @@ def _validate_native_absolute_path(
 ) -> Iterator[JsonSchemaValidationError]:
     if not isinstance(instance, str) or not isinstance(platform, str):
         return
-    path_type = PureWindowsPath if platform == PlatformName.WINDOWS.value else PurePosixPath
-    if not path_type(instance).is_absolute():
+    try:
+        platform_name = PlatformName(platform)
+    except ValueError:
+        yield JsonSchemaValidationError(f"unknown native platform {platform}")
+        return
+    if not _is_native_absolute_path(instance, platform_name):
         yield JsonSchemaValidationError(f"value must be an absolute {platform} path")
 
 
@@ -1057,9 +1069,7 @@ def _enrich_wire_schema(schema: object, config: ProtocolConfig) -> None:
         _enrich_wire_schema(value, config)
 
 
-def _bind_output_profile(
-    tool: ToolName, schema: dict[str, object], config: ProtocolConfig
-) -> None:
+def _bind_output_profile(tool: ToolName, schema: dict[str, object], config: ProtocolConfig) -> None:
     if tool is ToolName.SHELL_OPEN:
         properties = cast(dict[str, dict[str, object]], schema["properties"])
         properties["dialect"] = {

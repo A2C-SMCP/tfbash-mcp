@@ -289,9 +289,7 @@ def _composition(
     startup_command: str | None = "conda activate analytics",
 ) -> RuntimeComposition:
     runtime_name = (
-        RuntimeName.WINDOWS_PWSH
-        if operating_system == "Windows"
-        else RuntimeName.POSIX_BASH
+        RuntimeName.WINDOWS_PWSH if operating_system == "Windows" else RuntimeName.POSIX_BASH
     )
     workspace = r"C:\workspace" if operating_system == "Windows" else "/workspace"
     shell = r"C:\PowerShell\pwsh.exe" if operating_system == "Windows" else "/bin/bash"
@@ -318,9 +316,7 @@ def _composition(
 
 def test_shell_open_precedence_and_explicit_null_startup() -> None:
     composition = _composition(environment={"PATH": "/host/bin", "TOKEN": "secret"})
-    defaults = composition.resolve_shell_start(
-        directory_exists=lambda path: path == "/workspace"
-    )
+    defaults = composition.resolve_shell_start(directory_exists=lambda path: path == "/workspace")
     explicit = composition.resolve_shell_start(
         ShellOpenOverrides(
             cwd="/project",
@@ -392,9 +388,7 @@ def test_standard_venv_is_inherited_without_activation_or_discovery(
         checked_paths.append(path)
         return path == workspace
 
-    request = composition.resolve_shell_start(
-        directory_exists=existing_workspace
-    )
+    request = composition.resolve_shell_start(directory_exists=existing_workspace)
 
     assert request.environment["VIRTUAL_ENV"] == venv_root
     assert request.environment[path_key] == bin_path
@@ -420,9 +414,7 @@ def test_host_profiles_share_resolution_and_runtime_descriptions() -> None:
 
 
 def test_agent_context_is_authoritative_and_redacted() -> None:
-    composition = _composition(
-        environment={"PATH": "/venv/bin:/usr/bin", "TOKEN": "top-secret"}
-    )
+    composition = _composition(environment={"PATH": "/venv/bin:/usr/bin", "TOKEN": "top-secret"})
 
     context = composition.agent_context(shell_version="5.2.37")
 
@@ -440,9 +432,13 @@ def test_agent_context_is_authoritative_and_redacted() -> None:
             "environment": {"kind": "conda", "name": "analytics"},
         },
     }
-    visible = repr(context.diagnostics()) + composition.instructions() + repr(
-        composition.tool_descriptions()
-    ) + repr(context) + repr(composition.host)
+    visible = (
+        repr(context.diagnostics())
+        + composition.instructions()
+        + repr(composition.tool_descriptions())
+        + repr(context)
+        + repr(composition.host)
+    )
     for secret in ("top-secret", "conda activate analytics", "/bin/bash"):
         assert secret not in visible
 

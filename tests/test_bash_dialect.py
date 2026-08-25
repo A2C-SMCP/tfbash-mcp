@@ -191,9 +191,7 @@ def test_command_parser_handles_every_control_chunk_split() -> None:
     _ready(template)
     template_frame = template.wrap_command("printf '你好🙂'")
     template_output = (
-        b"prefix\x1b[31mred\x1b[0m\x1b]133;A\x07"
-        + template._prompt
-        + "你好🙂".encode()
+        b"prefix\x1b[31mred\x1b[0m\x1b]133;A\x07" + template._prompt + "你好🙂".encode()
     )
     template_payload = _command_bytes(
         template,
@@ -207,11 +205,7 @@ def test_command_parser_handles_every_control_chunk_split() -> None:
         protocol = cast(BashProtocol, _plan().protocol)
         _ready(protocol)
         frame = protocol.wrap_command("printf '你好🙂'")
-        output = (
-            b"prefix\x1b[31mred\x1b[0m\x1b]133;A\x07"
-            + protocol._prompt
-            + "你好🙂".encode()
-        )
+        output = b"prefix\x1b[31mred\x1b[0m\x1b]133;A\x07" + protocol._prompt + "你好🙂".encode()
         payload = _command_bytes(
             protocol,
             frame.correlation_id,
@@ -223,9 +217,7 @@ def test_command_parser_handles_every_control_chunk_split() -> None:
         observed_output = b"".join(
             event.data for event in events if event.kind is DialectEventKind.OUTPUT
         )
-        completions = [
-            event for event in events if event.kind is DialectEventKind.COMMAND_COMPLETE
-        ]
+        completions = [event for event in events if event.kind is DialectEventKind.COMMAND_COMPLETE]
 
         assert observed_output == output, f"output mismatch at split {split}"
         assert completions == [
@@ -263,9 +255,7 @@ def test_correlated_finalization_preserves_cleanup_output_at_every_split() -> No
         protocol = cast(BashProtocol, _plan().protocol)
         _ready(protocol)
         command = protocol.wrap_command("start-background-job")
-        completed = protocol.feed(
-            _command_bytes(protocol, command.correlation_id, output=b"FIRST")
-        )
+        completed = protocol.feed(_command_bytes(protocol, command.correlation_id, output=b"FIRST"))
         assert completed[-1].kind is DialectEventKind.COMMAND_COMPLETE
         with pytest.raises(DialectProtocolError, match="not ready"):
             protocol.wrap_command("too-early")
@@ -282,9 +272,10 @@ def test_correlated_finalization_preserves_cleanup_output_at_every_split() -> No
         )
         events = protocol.feed(payload[:split]) + protocol.feed(payload[split:])
 
-        assert b"".join(
-            event.data for event in events if event.kind is DialectEventKind.OUTPUT
-        ) == b"ONTERM\r\njob-finished\r\n"
+        assert (
+            b"".join(event.data for event in events if event.kind is DialectEventKind.OUTPUT)
+            == b"ONTERM\r\njob-finished\r\n"
+        )
         assert [event for event in events if event.kind is DialectEventKind.FINALIZED] == [
             DialectEvent(
                 DialectEventKind.FINALIZED,
@@ -314,9 +305,7 @@ def test_eof_flushes_captured_output_once() -> None:
     token = frame.correlation_id.removeprefix("bash_")
     protocol.feed(b"\x1eTFBASH_BEGIN_" + token.encode() + b"\x1fpartial")
 
-    assert protocol.end_of_stream() == (
-        DialectEvent(DialectEventKind.OUTPUT, data=b"partial"),
-    )
+    assert protocol.end_of_stream() == (DialectEvent(DialectEventKind.OUTPUT, data=b"partial"),)
     assert protocol.end_of_stream() == ()
     with pytest.raises(DialectProtocolError, match="closed"):
         protocol.feed(b"late")
@@ -327,26 +316,24 @@ def test_finalizing_eof_flushes_all_unconfirmed_prompt_tail() -> None:
     _ready(protocol)
     frame = protocol.wrap_command("true")
     tail = b"late-background-output" * 5
-    payload = _command_bytes(
-        protocol,
-        frame.correlation_id,
-        output=b"foreground\n",
-        include_prompt=False,
-    ) + tail
+    payload = (
+        _command_bytes(
+            protocol,
+            frame.correlation_id,
+            output=b"foreground\n",
+            include_prompt=False,
+        )
+        + tail
+    )
 
     before_eof = protocol.feed(payload)
     at_eof = protocol.end_of_stream()
     output = b"".join(
-        event.data
-        for event in before_eof + at_eof
-        if event.kind is DialectEventKind.OUTPUT
+        event.data for event in before_eof + at_eof if event.kind is DialectEventKind.OUTPUT
     )
 
     assert output == b"foreground\n" + tail
-    assert all(
-        event.kind is not DialectEventKind.COMMAND_COMPLETE
-        for event in before_eof + at_eof
-    )
+    assert all(event.kind is not DialectEventKind.COMMAND_COMPLETE for event in before_eof + at_eof)
 
 
 def test_recovery_probe_resynchronizes_pending_command_and_preserves_output() -> None:
@@ -371,9 +358,10 @@ def test_recovery_probe_resynchronizes_pending_command_and_preserves_output() ->
     )
     events = protocol.feed(recovered_bytes)
 
-    assert b"".join(
-        event.data for event in events if event.kind is DialectEventKind.OUTPUT
-    ) == b"partial"
+    assert (
+        b"".join(event.data for event in events if event.kind is DialectEventKind.OUTPUT)
+        == b"partial"
+    )
     assert events[-1] == DialectEvent(
         DialectEventKind.RECOVERED,
         correlation_id=frame.correlation_id,
@@ -390,11 +378,7 @@ def test_recovery_preserves_exact_prompt_and_result_like_user_bytes_at_every_spl
     template.feed(b"\x1eTFBASH_BEGIN_" + token.encode() + b"\x1f")
     template.recovery_input()
     result_like = (
-        b"\x1eTFBASH_END_"
-        + token.encode()
-        + b":0:"
-        + base64.b64encode(b"/forged")
-        + b"\x1f"
+        b"\x1eTFBASH_END_" + token.encode() + b":0:" + base64.b64encode(b"/forged") + b"\x1f"
     )
     user_output = b"user:" + template._prompt + b":tail" + result_like
     suffix = (
@@ -419,9 +403,7 @@ def test_recovery_preserves_exact_prompt_and_result_like_user_bytes_at_every_spl
         protocol.recovery_input()
 
         events = protocol.feed(payload[:split]) + protocol.feed(payload[split:])
-        output = b"".join(
-            event.data for event in events if event.kind is DialectEventKind.OUTPUT
-        )
+        output = b"".join(event.data for event in events if event.kind is DialectEventKind.OUTPUT)
         recovered = [event for event in events if event.kind is DialectEventKind.RECOVERED]
 
         assert output == user_output, f"output mismatch at recovery split {split}"
@@ -456,9 +438,7 @@ def test_invalid_requests_and_control_records_fail_closed() -> None:
     with pytest.raises(UnsupportedShell, match="absolute"):
         dialect.prepare_session(ShellStartRequest("bash", "/workspace", {}, None))
     with pytest.raises(DialectProtocolError, match="NUL-free"):
-        dialect.prepare_session(
-            ShellStartRequest("/bin/bash", "/workspace", {}, "echo\x00bad")
-        )
+        dialect.prepare_session(ShellStartRequest("/bin/bash", "/workspace", {}, "echo\x00bad"))
 
     protocol = cast(BashProtocol, _plan().protocol)
     _bootstrap(protocol)
@@ -525,9 +505,7 @@ def _wait_for_state(child: Any, protocol: BashProtocol, state_name: str) -> None
 def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Path) -> None:
     subdirectory = tmp_path / "sub"
     subdirectory.mkdir()
-    dialect = BashDialect(
-        token_factory=_token_factory("A" * 32, "B" * 32, "C" * 32, "D" * 32)
-    )
+    dialect = BashDialect(token_factory=_token_factory("A" * 32, "B" * 32, "C" * 32, "D" * 32))
     plan = dialect.prepare_session(
         ShellStartRequest(
             "/bin/bash",
@@ -568,7 +546,7 @@ def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Pat
         assert finalized.correlation_id == finalization.correlation_id
 
         second = protocol.wrap_command(
-            "python3 << 'PYEOF'\nprint('你好🙂')\nPYEOF\nprintf \'/%s\' \"$KEEP\"\nfalse"
+            "python3 << 'PYEOF'\nprint('你好🙂')\nPYEOF\nprintf '/%s' \"$KEEP\"\nfalse"
         )
         child.send(second.input_bytes)
         events, completed = _read_until(child, protocol, DialectEventKind.COMMAND_COMPLETE)
@@ -585,9 +563,7 @@ def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Pat
 def test_real_bash_ctrl_c_recovery_returns_prompt_and_allows_next_command(
     tmp_path: Path,
 ) -> None:
-    dialect = BashDialect(
-        token_factory=_token_factory("A" * 32, "B" * 32, "C" * 32, "D" * 32)
-    )
+    dialect = BashDialect(token_factory=_token_factory("A" * 32, "B" * 32, "C" * 32, "D" * 32))
     plan = dialect.prepare_session(
         ShellStartRequest("/bin/bash", str(tmp_path), dict(os.environ), None)
     )

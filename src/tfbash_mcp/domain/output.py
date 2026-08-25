@@ -86,9 +86,7 @@ class Utf8OutputBuffer:
                 raise InvalidCursor("cursor splits a UTF-8 code point")
 
             end = min(len(self._data), offset + max_bytes)
-            while end > offset and end < len(self._data) and _is_continuation_byte(
-                self._data[end]
-            ):
+            while end > offset and end < len(self._data) and _is_continuation_byte(self._data[end]):
                 end -= 1
             chunk = bytes(self._data[offset:end])
             next_cursor = effective_cursor + len(chunk)
