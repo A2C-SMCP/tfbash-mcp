@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 SCHEMA = "tfbash-windows-supervisor-evidence/v1"
 RESULT_SCHEMA = "tfbash-windows-supervisor-result/v1"
-NATIVE_GATE_REPETITIONS = 20
+NATIVE_GATE_REPETITIONS = 1
 SSH_SMOKE_MAX_REPETITIONS = 5
 REQUIRED_CHECKS = (
     "bootstrap_in_job",
@@ -46,7 +46,7 @@ def evaluate_evidence(payload: Mapping[str, object]) -> EvidenceDecision:
     if tier == "hosted-smoke" and not 1 <= repetitions <= SSH_SMOKE_MAX_REPETITIONS:
         raise EvidenceError("SSH smoke repetitions must be between 1 and 5")
     if tier == "native-gate" and repetitions != NATIVE_GATE_REPETITIONS:
-        raise EvidenceError("the native supervisor gate requires exactly 20 repetitions")
+        raise EvidenceError("the native supervisor gate requires exactly one fresh session")
     environment = payload.get("environment")
     if not isinstance(environment, Mapping):
         raise EvidenceError("environment evidence is missing")

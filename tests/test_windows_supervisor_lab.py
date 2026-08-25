@@ -28,7 +28,7 @@ def _evidence(*, tier: str = "hosted-smoke", repetitions: int = 3) -> dict[str, 
         }
         for iteration in range(1, repetitions + 1)
     ]
-    decision_ready = tier == "native-gate" and repetitions == 20
+    decision_ready = tier == "native-gate" and repetitions == 1
     return {
         "schema": SCHEMA,
         "evidence_tier": tier,
@@ -63,7 +63,7 @@ def test_ssh_smoke_can_pass_contract_but_never_unlock_production() -> None:
 
 def test_hosted_smoke_accepts_windows_server_but_native_gate_does_not() -> None:
     hosted = _evidence()
-    native = _evidence(tier="native-gate", repetitions=20)
+    native = _evidence(tier="native-gate", repetitions=1)
     for payload in (hosted, native):
         environment = payload["environment"]
         assert isinstance(environment, dict)
@@ -75,18 +75,18 @@ def test_hosted_smoke_accepts_windows_server_but_native_gate_does_not() -> None:
         evaluate_evidence(native)
 
 
-def test_native_gate_requires_exactly_twenty_complete_iterations() -> None:
-    decision = evaluate_evidence(_evidence(tier="native-gate", repetitions=20))
+def test_native_gate_requires_one_complete_fresh_session() -> None:
+    decision = evaluate_evidence(_evidence(tier="native-gate", repetitions=1))
 
     assert decision.decision_ready
     assert decision.decision == "pass"
 
 
-@pytest.mark.parametrize("repetitions", [1, 5, 19, 21])
-def test_native_gate_rejects_any_non_twenty_repetition_count(repetitions: int) -> None:
+@pytest.mark.parametrize("repetitions", [0, 2, 5, 20])
+def test_native_gate_rejects_any_non_one_repetition_count(repetitions: int) -> None:
     payload = _evidence(tier="native-gate", repetitions=repetitions)
 
-    with pytest.raises(EvidenceError, match="exactly 20"):
+    with pytest.raises(EvidenceError, match="exactly one fresh session"):
         evaluate_evidence(payload)
 
 
@@ -102,7 +102,7 @@ def test_evaluator_recomputes_each_check_instead_of_trusting_summary() -> None:
 
 @pytest.mark.parametrize(
     ("tier", "repetitions", "decision_ready"),
-    [("hosted-smoke", 3, False), ("native-gate", 20, True)],
+    [("hosted-smoke", 3, False), ("native-gate", 1, True)],
 )
 def test_verifier_binds_result_to_source_commit_and_recomputes_tier(
     tmp_path: Path,

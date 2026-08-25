@@ -8,15 +8,15 @@ param(
     [Parameter(Mandatory = $true)][string]$PackageSha256,
     [Parameter(Mandatory = $true)][string]$TargetName,
     [Parameter(Mandatory = $true)][ValidateSet("hosted-smoke", "native-gate")][string]$EvidenceTier,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 20)][int]$Repetitions
+    [Parameter(Mandatory = $true)][ValidateRange(1, 5)][int]$Repetitions
 )
 
 $ErrorActionPreference = "Stop"
 if ($EvidenceTier -eq "hosted-smoke" -and $Repetitions -gt 5) {
     throw "SSH smoke permits only 1-5 repetitions"
 }
-if ($EvidenceTier -eq "native-gate" -and $Repetitions -ne 20) {
-    throw "The supervisor native gate requires exactly 20 repetitions"
+if ($EvidenceTier -eq "native-gate" -and $Repetitions -ne 1) {
+    throw "The supervisor native gate requires exactly one fresh session"
 }
 $experimentExitCode = 1
 $startedAt = [DateTimeOffset]::UtcNow

@@ -450,7 +450,7 @@ def run_probe(
     if evidence_tier == "hosted-smoke" and not 1 <= repetitions <= SSH_SMOKE_MAX_REPETITIONS:
         raise ProbeError("SSH smoke repetitions must be between 1 and 5")
     if evidence_tier == "native-gate" and repetitions != NATIVE_GATE_REPETITIONS:
-        raise ProbeError("the native supervisor gate requires exactly 20 repetitions")
+        raise ProbeError("the native supervisor gate requires exactly one fresh session")
     if evidence_tier not in {"hosted-smoke", "native-gate"}:
         raise ProbeError("unknown evidence tier")
     environment = _environment(pwsh, source_commit)

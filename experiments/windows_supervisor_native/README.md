@@ -11,10 +11,11 @@ them over SSH, and performs the remaining Windows setup without internet or
 machine-wide installation.
 
 Normal SSH evidence is hosted-smoke and inconclusive. A separate explicit
-`--native-gate` controller option runs exactly 20 fresh native sessions through
-SSH; SSH is only the outer control channel and the probe still creates real Job
-Objects and ConPTY instances on the Windows target. The deterministic package
-also contains `RUN_WINDOWS11_SUPERVISOR.ps1` as an offline fallback. The
-evidence evaluator recomputes every check and rejects missing, duplicated,
-out-of-order, wrong-version, wrong-architecture, wrong-commit, or incorrectly
-promoted results.
+`--native-gate` controller option runs one fresh native session through SSH;
+that session must pass all ten independent supervisor checks. SSH is only the
+outer control channel and the probe still creates real Job Objects and ConPTY
+instances on the Windows target. The deterministic package also contains
+`RUN_WINDOWS11_SUPERVISOR.ps1` as an offline fallback. The evidence evaluator
+recomputes every check and rejects missing, duplicated, out-of-order,
+wrong-version, wrong-architecture, wrong-commit, or incorrectly promoted
+results. Additional repetitions remain available as non-blocking smoke runs.

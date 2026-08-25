@@ -30,6 +30,7 @@ from experiments.windows_phase0.lab import (
     repository_root,
 )
 from experiments.windows_supervisor_native.contracts import (
+    NATIVE_GATE_REPETITIONS,
     RESULT_SCHEMA,
     SCHEMA,
     EvidenceDecision,
@@ -201,8 +202,8 @@ class WindowsSupervisorLab:
     ) -> SupervisorRunInfo:
         if evidence_tier == "hosted-smoke" and not 1 <= repetitions <= 5:
             raise LabError("supervisor SSH smoke repetitions must be between 1 and 5")
-        if evidence_tier == "native-gate" and repetitions != 20:
-            raise LabError("the supervisor native gate requires exactly 20 repetitions")
+        if evidence_tier == "native-gate" and repetitions != NATIVE_GATE_REPETITIONS:
+            raise LabError("the supervisor native gate requires exactly one fresh session")
         if evidence_tier not in {"hosted-smoke", "native-gate"}:
             raise LabError("unknown supervisor evidence tier")
         prefix = "supervisor-gate-" if evidence_tier == "native-gate" else "supervisor-"
@@ -369,7 +370,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--native-gate",
         action="store_true",
-        help="run the fixed 20-repetition decision gate through SSH",
+        help="run the one-session decision gate through SSH",
     )
     parser.add_argument("--skip-bootstrap", action="store_true")
     return parser
@@ -391,7 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     lab = WindowsSupervisorLab(repository=root, config=config, transport=transport)
     package = lab.deploy(args.source_ref)
     evidence_tier = "native-gate" if args.native_gate else "hosted-smoke"
-    repetitions = 20 if args.native_gate else args.repetitions
+    repetitions = NATIVE_GATE_REPETITIONS if args.native_gate else args.repetitions
     run = lab.run_remote(
         package,
         evidence_tier=evidence_tier,

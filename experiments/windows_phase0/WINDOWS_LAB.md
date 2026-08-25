@@ -40,8 +40,9 @@ uv run --group windows-lab python scripts/windows_lab.py --env-file .env all
 ```
 
 Repetitions are a per-run option, not connection state. Choose 1–5 without
-editing `.env`, for example `all --repetitions 1`. The default is 3. The formal
-native gate remains fixed at 20 repetitions.
+editing `.env`, for example `all --repetitions 1`. The default is 3. This legacy
+Phase 0 matrix remains a diagnostic runner; the production supervisor gate is
+defined below and uses one fresh session with ten mandatory checks.
 
 Individual stages are also available:
 
@@ -113,7 +114,7 @@ deployment, SSH execution, collection, and local evidence recomputation. Use
 The 1–5 repetition SSH result may prove that the candidate works on that host,
 but it remains `decision=inconclusive` by contract.
 
-After a smoke passes, the Mac can run #15's fixed formal gate without an
+After a smoke passes, the Mac can run #15's formal gate without an
 engineer operating the Windows desktop:
 
 ```shell
@@ -122,11 +123,13 @@ uv run --group windows-lab python scripts/windows_supervisor_lab.py \
   --skip-bootstrap --native-gate
 ```
 
-`--native-gate` ignores the smoke repetition option and always runs exactly 20
-fresh sessions. This is valid native evidence: the probe creates and inspects
-real Job Objects, processes, named events, and ConPTY instances on the target;
-SSH is only the outer control channel. The local verifier still recomputes the
-full evidence matrix before accepting `decision_ready=true`.
+`--native-gate` ignores the smoke repetition option and runs one fresh session.
+This is valid native evidence only when all ten checks pass on a Windows 11
+Client: the probe creates and inspects real Job Objects, processes, named
+events, and ConPTY instances on the target; SSH is only the outer control
+channel. The local verifier still recomputes the full evidence matrix before
+accepting `decision_ready=true`. Extra 1–5 repetition smoke runs are optional
+stability evidence and do not block production integration.
 
 Each repetition independently checks:
 
@@ -139,9 +142,8 @@ Each repetition independently checks:
 
 The extracted package also contains
 `experiments/windows_supervisor_native/RUN_WINDOWS11_SUPERVISOR.ps1`. The formal
-native gate is hard-coded to exactly 20 repetitions and is the only path that
-can produce `decision_ready=true`; the Mac `--native-gate` path enforces the
-same contract. An engineer is needed only if the target's policy blocks
-SSH/user-scoped execution or for #12's separate interactive-desktop impact
-check. #15 installation, formal execution, collection, and verification stay
-Mac-controlled.
+native gate is hard-coded to one fresh session and is the only path that can
+produce `decision_ready=true`; the Mac `--native-gate` path enforces the same
+contract. An engineer is needed only if the target's policy blocks
+SSH/user-scoped execution. #15 installation, formal execution, collection, and
+verification stay Mac-controlled.
