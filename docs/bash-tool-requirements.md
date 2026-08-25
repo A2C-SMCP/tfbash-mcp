@@ -209,6 +209,15 @@ V1 只暴露一个 Shell 资源模型，共七个工具：
 - `env` 省略时不增加覆盖项；提供时以 key 覆盖 Server 进程继承的环境。最多 256 项，key 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，每个 UTF-8 value 不超过 32768 字节；Windows Profile 按不区分大小写的环境变量语义拒绝 `PATH`/`Path` 这类重复 key；
 - `yield_ms`、`timeout_ms`、`wait_ms` 和 `duration_ms` 使用单调时钟；只有 `created_at_ms` 是 Unix epoch wall-clock timestamp。
 
+协议 schema 使用 JSON Schema Draft 2020-12，并要求识别
+`https://github.com/A2C-SMCP/tfbash-mcp/schema/v1` vocabulary。该 vocabulary 的
+`x-validUtf8`、`x-utf8-maxBytes`、`x-decoded-maxBytes`、`x-nativeAbsolutePath`、
+`x-caseInsensitiveUniqueKeys` 与 `x-fieldLessThanOrEqual` 分别断言 UTF-8/解码后字节上限、
+平台原生绝对路径、Windows object key 大小写不敏感唯一性和字段间数值顺序；该 vocabulary
+还把 `integer` 收紧为不接受浮点数的 JSON/Python integer。它们不是可忽略的 annotation。标准 JSON
+Schema vocabulary 无法等价表达这些条件，协议消费者必须使用公开的
+`validate_schema_instance`，服务端则继续通过对应 DTO validator 执行同一约束。
+
 ### 5.2 `shell_open` 与 Shell 管理
 
 `shell_open` 创建持久 Command Shell，输入初始 cwd、环境、Shell 程序和可选启动命令：
@@ -394,7 +403,7 @@ Snapshot 中所有共同字段都必须出现，终态附加字段只在终态�
 | `running` | `null` | 不出现 | 命令尚未到达终态 |
 | `exited` | 平台规范化 integer | 必须出现；通常 `shell_status=ready` | 方言 prompt 与退出码定界符完整；包括控制投递后 Shell 最终返回的状态码 |
 | `timeout` | `null` | 必须出现；`shell_status=ready/error` | `timeout_ms` 到期，由 Server 发起恢复或重建 |
-| `cancelled` | `null` | 必须出现；`shell_status=closing` | close/shutdown 的取消 CAS 胜出 |
+| `cancelled` | `null` | 必须出现；`shell_status=ready/error/closing` | close/shutdown 的取消 CAS 胜出，或强制终止后 Shell 重建成功/失败 |
 | `shell_error` | `null` | 必须出现；通常 `shell_status=error` | 无法取得可信 `$?` 或 Shell/worker 故障 |
 
 若 close admission fence 先发生、自然终态 CAS 后发生但先于 close cancellation CAS，则保留自然终态，同时该 snapshot 的 `shell_status=closing`；因此 `exited`、`timeout` 或 `shell_error` 也可能与 `closing` 组合。`shell_rebuilt` 始终是 boolean。`eof` 不由 `status` 单独决定，而只表示终态输出是否已经读到当前末尾。
@@ -796,9 +805,9 @@ WindowsPwshProfile
 
 实验候选至少包含：A）pywinpty 3.0.5 + ConPTY + Toolhelp/process-creation identity + `taskkill`；B）同一 ConPTY transport + Windows Job Object 所有权与强制回收。Codex/DeepSeek 仅作为行为与分层参考，不作为第三个 Python 候选。
 
-关键门槛预先固定为：UTF-8/中文/emoji 字节结果完全一致；快速退出 sentinel 尾部 20/20 不丢失；interrupt 后 3 秒内恢复 prompt 或完成可观察重建；terminate/kill/close/shutdown 20/20 无受管子孙残留；每个 Execution 只产生一个终态且无跨 Execution 迟到输出。EOF 场景若任一 Profile 不能 20/20 在保留持久 Shell 的同时结束当前 stdin，则判定公共 `eof` 合同失败并在冻结前删除。
+正式 Windows release gate 已按实际生产风险收敛为：在一台新鲜 Windows 11 Client x64 上，针对待发布精确 source commit 执行 1 个完整 native session，并要求 UTF-8/中文/emoji、快速退出尾部、exit code、控制、可观察重建、Job 回收、唯一终态和无跨 Execution 迟到输出等全部 10 项强制检查通过，同时满足 `contract_passed=true`、`decision_ready=true`、`decision=pass`。若同 Shell recovery 失败，只有重建成功且 Job 内零残留才可通过。GitHub-hosted Windows 和额外 1–5 次重复只作持续诊断，不再把固定 20 次作为 release 判定前提。
 
-只有候选 Windows Profile 全部通过跨平台语义门槛，V1 字段合同才可冻结并进入完整实现。若 EOF 无法等价实现，应在冻结前从公共 schema 删除；若控制、退出码或进程所有权失败，则调整候选 transport/supervisor 或收紧 V1 明示范围，不能静默降级。
+精确源码 `098420b001952bf7592d3ad3da8c515b2f7429e7` 已在 run `supervisor-gate-20260825T044840Z-dfdb00fc` 通过 1/1 session、10/10 mandatory checks。候选 B（ConPTY + gated bootstrap + non-breakaway kill-on-close Job Object）因此进入 production profile；公共 `shell_write.eof` 因无法跨两个 Profile 等价兑现，已在 schema 冻结前删除。后续任何 production Windows runtime 变更都必须重新对新的精确 source commit 执行同一 release gate。
 
 ### 7.6 Codex：native Windows 与 IDE context 参考
 

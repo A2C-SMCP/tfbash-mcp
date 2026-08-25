@@ -6,8 +6,11 @@ readme = "README.md"
 authors = [{ name = "A2C-SMCP" }]
 requires-python = ">=3.10,<3.13"
 dependencies = [
+    "jsonschema>=4.25.0,<5.0.0",
     "mcp>=1.29.0,<2.0.0",
     "pexpect>=4.9.0,<5.0.0",
+    "pywinpty==3.0.5; sys_platform == 'win32'",
+    "pydantic>=2.13.0,<2.14.0",
 ]
 
 [project.scripts]
@@ -18,15 +21,20 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
+windows-lab = [
+    "pexpect>=4.9.0,<5.0.0",
+]
 dev = [
     "mypy>=1.17.1,<1.18.0",
     "pytest>=8.4.1,<9.0.0",
     "pytest-cov>=6.2.1,<7.0.0",
     "ruff>=0.12.9,<0.13.0",
+    "types-jsonschema>=4.25.0,<5.0.0",
 ]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.coverage.run]

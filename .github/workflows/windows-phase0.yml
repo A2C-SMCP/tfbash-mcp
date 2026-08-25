@@ -1,0 +1,199 @@
+name: Windows Phase 0
+
+on:
+  push:
+    branches:
+      - main
+      - feature/issue-1-v1-shell-runtime
+      - feature/issue-12-windows-lab-infra
+    paths:
+      - ".github/workflows/windows-phase0.yml"
+      - "experiments/windows_phase0/**"
+      - "experiments/windows_supervisor_native/**"
+      - "scripts/windows_lab.py"
+      - "scripts/windows_supervisor_lab.py"
+      - "tests/test_windows_lab.py"
+      - "tests/test_windows_supervisor_lab.py"
+      - "tests/test_server_config.py"
+      - "tests/test_mcp_stdio.py"
+      - "src/tfbash_mcp/server.py"
+      - "src/tfbash_mcp/runtime/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-phase0.yml"
+      - "experiments/windows_phase0/**"
+      - "experiments/windows_supervisor_native/**"
+      - "scripts/windows_lab.py"
+      - "scripts/windows_supervisor_lab.py"
+      - "tests/test_windows_lab.py"
+      - "tests/test_windows_supervisor_lab.py"
+      - "tests/test_server_config.py"
+      - "tests/test_mcp_stdio.py"
+      - "src/tfbash_mcp/server.py"
+      - "src/tfbash_mcp/runtime/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lab-controller:
+    name: SSH-first lab controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          version: "0.8.17"
+          python-version: "3.12.10"
+
+      - name: Validate controller
+        run: |
+          uv run --group windows-lab ruff check experiments/windows_phase0/lab.py experiments/windows_supervisor_native scripts/windows_lab.py scripts/windows_supervisor_lab.py src/tfbash_mcp/server.py tests/test_windows_lab.py tests/test_windows_supervisor_lab.py tests/test_server_config.py
+          uv run --group windows-lab mypy
+          uv run --group windows-lab python -m pytest tests/test_windows_lab.py tests/test_windows_supervisor_lab.py tests/test_server_config.py
+
+  hosted-smoke:
+    name: Hosted Windows smoke
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          version: "0.8.17"
+          python-version: "3.12.10"
+
+      - name: Install pinned PowerShell
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "PowerShell-7.6.3-win-x64.zip"
+          $install = Join-Path $env:RUNNER_TEMP "PowerShell-7.6.3"
+          $uri = "https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/PowerShell-7.6.3-win-x64.zip"
+          $expected = "07DDB0D00B660459560EF82A9841DA7705B27CD5DCCA5A0D7B025A98ECA29ECA"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash
+          if ($actual -ne $expected) {
+            throw "PowerShell archive checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $install
+          "PHASE0_PWSH=$(Join-Path $install 'pwsh.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Test result contracts
+        run: uv run --python 3.12.10 --with pytest==8.4.2 -- pytest experiments/windows_phase0/test_contracts.py
+
+      - name: Parse Windows Lab PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem experiments/windows_phase0/infrastructure/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }
+            }
+          }
+          Get-ChildItem experiments/windows_supervisor_native/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }
+            }
+          }
+          if ($failed) { throw "PowerShell parser rejected Windows Lab scripts" }
+
+      - name: Run supervisor native hosted smoke (1 repetition)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sourceCommit = (git rev-parse HEAD).Trim()
+          uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
+            python -m experiments.windows_supervisor_native.probe `
+            --evidence-tier hosted-smoke `
+            --pwsh $env:PHASE0_PWSH `
+            --repetitions 1 `
+            --source-commit $sourceCommit `
+            --output artifacts/windows-supervisor-hosted/evidence.json
+          $experimentExitCode = $LASTEXITCODE
+          if ($experimentExitCode -notin @(0, 1)) {
+            throw "Supervisor smoke infrastructure failed with exit code $experimentExitCode"
+          }
+          if (-not (Test-Path artifacts/windows-supervisor-hosted/evidence.json -PathType Leaf)) {
+            throw "Supervisor smoke did not produce evidence"
+          }
+          Write-Host "Supervisor smoke experiment exit code: $experimentExitCode"
+          exit 0
+
+      - name: Run production Windows MCP stdio smoke
+        shell: pwsh
+        run: uv run --python 3.12.10 -- pytest tests/test_mcp_stdio.py -k production_windows_profile
+
+      - name: Run hosted smoke matrix (1 repetition)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
+            python -m experiments.windows_phase0.runner `
+            --environment-tier hosted-smoke `
+            --pwsh $env:PHASE0_PWSH `
+            --repetitions 1 `
+            --output-dir artifacts/windows-phase0-hosted
+          $experimentExitCode = $LASTEXITCODE
+          if ($experimentExitCode -notin @(0, 1)) {
+            throw "Hosted smoke infrastructure failed with exit code $experimentExitCode"
+          }
+          foreach ($name in @("environment.json", "observations.jsonl", "summary.json", "summary.md")) {
+            $path = Join-Path "artifacts/windows-phase0-hosted" $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Hosted smoke did not produce required evidence: $name"
+            }
+          }
+          Write-Host "Hosted smoke experiment exit code: $experimentExitCode"
+          exit 0
+
+      - name: Upload raw experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-phase0-hosted-${{ github.run_attempt }}
+          path: artifacts/windows-phase0-hosted
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload supervisor smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-supervisor-hosted-${{ github.run_attempt }}
+          path: artifacts/windows-supervisor-hosted
+          if-no-files-found: warn
+          retention-days: 30

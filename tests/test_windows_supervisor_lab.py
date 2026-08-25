@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from experiments.windows_phase0.lab import LabError
+from experiments.windows_supervisor_native.contracts import (
+    REQUIRED_CHECKS,
+    RESULT_SCHEMA,
+    SCHEMA,
+    EvidenceError,
+    evaluate_evidence,
+)
+from experiments.windows_supervisor_native.lab import verify_supervisor_result
+
+
+def _evidence(*, tier: str = "hosted-smoke", repetitions: int = 3) -> dict[str, object]:
+    iterations = [
+        {
+            "iteration": iteration,
+            "duration_ms": 100,
+            "checks": {name: True for name in REQUIRED_CHECKS},
+            "passed": True,
+            "diagnostics": {},
+        }
+        for iteration in range(1, repetitions + 1)
+    ]
+    decision_ready = tier == "native-gate" and repetitions == 1
+    return {
+        "schema": SCHEMA,
+        "evidence_tier": tier,
+        "repetitions": repetitions,
+        "environment": {
+            "windows_native": True,
+            "windows_client": True,
+            "windows_11": True,
+            "os_x64": True,
+            "python_x64": True,
+            "powershell_version": "7.6.3",
+            "pywinpty_version": "3.0.5",
+            "source_commit": "a" * 40,
+        },
+        "iterations": iterations,
+        "summary": {
+            "passed_iterations": repetitions,
+            "contract_passed": True,
+            "decision_ready": decision_ready,
+            "decision": "pass" if decision_ready else "inconclusive",
+        },
+    }
+
+
+def test_ssh_smoke_can_pass_contract_but_never_unlock_production() -> None:
+    decision = evaluate_evidence(_evidence())
+
+    assert decision.contract_passed
+    assert not decision.decision_ready
+    assert decision.decision == "inconclusive"
+
+
+def test_hosted_smoke_accepts_windows_server_but_native_gate_does_not() -> None:
+    hosted = _evidence()
+    native = _evidence(tier="native-gate", repetitions=1)
+    for payload in (hosted, native):
+        environment = payload["environment"]
+        assert isinstance(environment, dict)
+        environment["windows_client"] = False
+        environment["windows_11"] = False
+
+    assert evaluate_evidence(hosted).contract_passed
+    with pytest.raises(EvidenceError, match="windows_client"):
+        evaluate_evidence(native)
+
+
+def test_native_gate_requires_one_complete_fresh_session() -> None:
+    decision = evaluate_evidence(_evidence(tier="native-gate", repetitions=1))
+
+    assert decision.decision_ready
+    assert decision.decision == "pass"
+
+
+@pytest.mark.parametrize("repetitions", [0, 2, 5, 20])
+def test_native_gate_rejects_any_non_one_repetition_count(repetitions: int) -> None:
+    payload = _evidence(tier="native-gate", repetitions=repetitions)
+
+    with pytest.raises(EvidenceError, match="exactly one fresh session"):
+        evaluate_evidence(payload)
+
+
+def test_evaluator_recomputes_each_check_instead_of_trusting_summary() -> None:
+    payload = _evidence()
+    iterations = payload["iterations"]
+    assert isinstance(iterations, list)
+    iterations[1]["checks"]["grandchild_in_job"] = False
+
+    with pytest.raises(EvidenceError, match="pass flag is inconsistent"):
+        evaluate_evidence(payload)
+
+
+@pytest.mark.parametrize(
+    ("tier", "repetitions", "decision_ready"),
+    [("hosted-smoke", 3, False), ("native-gate", 1, True)],
+)
+def test_verifier_binds_result_to_source_commit_and_recomputes_tier(
+    tmp_path: Path,
+    tier: str,
+    repetitions: int,
+    decision_ready: bool,
+) -> None:
+    evidence = _evidence(tier=tier, repetitions=repetitions)
+    archive = tmp_path / "result.zip"
+    metadata = {
+        "schema": RESULT_SCHEMA,
+        "run_id": "supervisor-test",
+        "launch_channel": "ssh",
+        "evidence_tier": tier,
+        "source_commit": "a" * 40,
+        "package_sha256": "b" * 64,
+        "repetitions": repetitions,
+        "evidence_complete": True,
+    }
+    with zipfile.ZipFile(archive, "w") as result:
+        result.writestr("control-metadata.json", json.dumps(metadata))
+        result.writestr("exit-code.json", json.dumps({"experiment_exit_code": 0}))
+        result.writestr("supervisor-evidence.json", json.dumps(evidence))
+        result.writestr("terminal.log", "native probe output")
+
+    report = verify_supervisor_result(archive)
+
+    assert report.source_commit == "a" * 40
+    assert report.decision.contract_passed
+    assert report.decision.decision_ready is decision_ready
+
+
+def test_verifier_rejects_source_commit_mismatch(tmp_path: Path) -> None:
+    evidence = _evidence()
+    archive = tmp_path / "result.zip"
+    metadata = {
+        "schema": RESULT_SCHEMA,
+        "run_id": "supervisor-test",
+        "launch_channel": "ssh",
+        "evidence_tier": "hosted-smoke",
+        "source_commit": "c" * 40,
+        "package_sha256": "b" * 64,
+        "evidence_complete": True,
+    }
+    with zipfile.ZipFile(archive, "w") as result:
+        result.writestr("control-metadata.json", json.dumps(metadata))
+        result.writestr("exit-code.json", json.dumps({"experiment_exit_code": 0}))
+        result.writestr("supervisor-evidence.json", json.dumps(evidence))
+
+    with pytest.raises(LabError, match="source commit mismatch"):
+        verify_supervisor_result(archive)
