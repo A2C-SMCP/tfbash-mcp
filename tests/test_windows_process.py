@@ -526,7 +526,7 @@ def test_interrupt_is_delivered_only_after_bound_conpty_writer_accepts_it() -> N
 def test_control_translates_deadline_crossed_during_job_enumeration() -> None:
     supervisor, ownership, api = _attached()
     api.add_process(200, parent_id=100)
-    api.enumeration_delay = 0.01
+    api.enumeration_error = TimeoutError("enumeration deadline")
 
     with pytest.raises(ProcessControlError, match="Windows process control failed"):
         supervisor.control(

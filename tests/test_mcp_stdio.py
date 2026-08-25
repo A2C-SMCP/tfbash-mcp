@@ -85,9 +85,23 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
     server_arguments: list[str], expected_mode: str
 ) -> None:
     async def scenario() -> None:
+        runtime_arguments: list[str]
+        if sys.platform == "win32":
+            runtime_arguments = [
+                "--runtime-profile",
+                "windows-pwsh",
+                "--shell",
+                os.environ["PHASE0_PWSH"],
+            ]
+            expected_dialect = "pwsh"
+            command = "Write-Output mcp-e2e"
+        else:
+            runtime_arguments = []
+            expected_dialect = "bash"
+            command = "printf mcp-e2e"
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "tfbash_mcp", *server_arguments],
+            args=["-m", "tfbash_mcp", *runtime_arguments, *server_arguments],
             cwd=Path.cwd(),
         )
         async with (
@@ -96,7 +110,7 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
         ):
             initialized = await session.initialize()
             assert initialized.instructions is not None
-            assert "bash dialect" in initialized.instructions
+            assert f"{expected_dialect} dialect" in initialized.instructions
 
             listed = await session.list_tools()
             assert [tool.name for tool in listed.tools] == [
@@ -121,7 +135,7 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             context_result = await session.call_tool("shell_list", {})
             context = cast(dict[str, Any], context_result.structuredContent)
             assert context_result.isError is False
-            assert context["runtime"]["dialect"] == "bash"
+            assert context["runtime"]["dialect"] == expected_dialect
             assert context["host"]["mode"] == expected_mode
             assert context["runtime"]["default_cwd"] == str(Path.cwd())
 
@@ -130,11 +144,17 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             shell_id = cast(str, opened_content["shell_id"])
             executed = await session.call_tool(
                 "shell_exec",
-                {"shell_id": shell_id, "command": "printf mcp-e2e", "yield_ms": 2_000},
+                {"shell_id": shell_id, "command": command, "yield_ms": 2_000},
             )
             execution = cast(dict[str, Any], executed.structuredContent)
+            if execution["status"] == "running":
+                execution = await _read_until_terminal(
+                    session,
+                    shell_id=shell_id,
+                    exec_id=cast(str, execution["exec_id"]),
+                )
             assert execution["status"] == "exited"
-            assert execution["output"] == "mcp-e2e"
+            assert cast(str, execution["output"]).strip() == "mcp-e2e"
 
             closed = await session.call_tool("shell_close", {"shell_id": shell_id})
             closed_content = cast(dict[str, Any], closed.structuredContent)
@@ -254,6 +274,12 @@ def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
                 {"shell_id": shell_id, "command": environment_probe, "yield_ms": 5_000},
             )
             first_content = cast(dict[str, Any], first.structuredContent)
+            if first_content["status"] == "running":
+                first_content = await _read_until_terminal(
+                    session,
+                    shell_id=shell_id,
+                    exec_id=cast(str, first_content["exec_id"]),
+                )
             assert first_content["status"] == "exited"
             assert first_content["exit_code"] == 0
             assert first_content["output"] == "posix-host-ready"
@@ -297,6 +323,12 @@ def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
                 {"shell_id": shell_id, "command": environment_probe, "yield_ms": 5_000},
             )
             replayed_content = cast(dict[str, Any], replayed.structuredContent)
+            if replayed_content["status"] == "running":
+                replayed_content = await _read_until_terminal(
+                    session,
+                    shell_id=shell_id,
+                    exec_id=cast(str, replayed_content["exec_id"]),
+                )
             assert replayed_content["status"] == "exited"
             assert replayed_content["exit_code"] == 0
             assert replayed_content["output"] == "posix-host-ready"
@@ -392,6 +424,12 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 },
             )
             execution = cast(dict[str, Any], executed.structuredContent)
+            if execution["status"] == "running":
+                execution = await _read_until_terminal(
+                    session,
+                    shell_id=shell_id,
+                    exec_id=cast(str, execution["exec_id"]),
+                )
             assert execution["status"] == "exited"
             assert cast(str, execution["output"]).strip() == "mcp-windows-e2e"
             assert execution["exit_code"] == 37
@@ -436,6 +474,12 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 },
             )
             recovered_content = cast(dict[str, Any], recovered.structuredContent)
+            if recovered_content["status"] == "running":
+                recovered_content = await _read_until_terminal(
+                    session,
+                    shell_id=shell_id,
+                    exec_id=cast(str, recovered_content["exec_id"]),
+                )
             assert recovered_content["status"] == "exited"
             assert cast(str, recovered_content["output"]).strip() == "mcp-windows-rebuilt"
 

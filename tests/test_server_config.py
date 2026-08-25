@@ -148,7 +148,7 @@ def test_agent_visible_schema_omits_shell_and_startup_command_defaults() -> None
     contracts = tool_contract_schemas(
         ProtocolConfig(
             platform=PlatformName.LINUX,
-            default_cwd=str(Path.cwd()),
+            default_cwd="/workspace",
             shell=secret_shell,
             startup_command=secret_startup,
         )
@@ -165,14 +165,18 @@ def test_agent_visible_schema_omits_shell_and_startup_command_defaults() -> None
     assert secret_startup not in serialized
 
 
-def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor() -> None:
+def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os.path, "isdir", lambda _path: True)
+    monkeypatch.setattr(server_module, "_probe_shell_version", lambda *args, **kwargs: "5.2")
     arguments = build_parser().parse_args(
         ["--close-timeout-ms", "5000", "--shutdown-grace-ms", "1234"]
     )
     service = build_service(
         arguments,
         operating_system="linux",
-        process_cwd=str(Path.cwd()),
+        process_cwd="/workspace",
         inherited_environment={},
     )
     manager = cast(CommandShellManager, service._manager)
@@ -185,7 +189,12 @@ def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor
     service.shutdown()
 
 
-def test_saturated_wait_lane_cannot_starve_close_control() -> None:
+def test_saturated_wait_lane_cannot_starve_close_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os.path, "isdir", lambda _path: True)
+    monkeypatch.setattr(server_module, "_probe_shell_version", lambda *args, **kwargs: "5.2")
+
     class BlockingExecManager:
         def __init__(self) -> None:
             self.active = Event()
@@ -237,7 +246,7 @@ def test_saturated_wait_lane_cannot_starve_close_control() -> None:
         service = build_service(
             arguments,
             operating_system="linux",
-            process_cwd=str(Path.cwd()),
+            process_cwd="/workspace",
             inherited_environment={},
         )
         service.shutdown()

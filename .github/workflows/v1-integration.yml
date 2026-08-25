@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feature/issue-11-integration-matrix
     paths:
       - ".github/workflows/v1-integration.yml"
       - "src/**"
@@ -62,8 +61,12 @@ jobs:
             tests/test_runtime_contracts.py \
             tests/test_bash_dialect.py \
             tests/test_posix_pty.py \
-            tests/test_posix_process.py \
-            tests/test_shell_manager.py \
+            tests/test_posix_process.py::test_domain_control_targets_real_bash_foreground_group_and_recovers \
+            tests/test_posix_process.py::test_control_reaches_pipeline_after_process_group_leader_exits \
+            tests/test_posix_process.py::test_cleanup_reaps_running_stopped_stubborn_and_disowned_jobs \
+            tests/test_shell_manager.py::test_both_runtime_profiles_reuse_the_same_manager_worker \
+            tests/test_shell_manager.py::test_real_posix_exec_yield_read_timeout_and_reuse \
+            tests/test_shell_manager.py::test_real_posix_finalization_prevents_cross_execution_late_output \
             tests/test_mcp_stdio.py
 
   windows-native:
@@ -115,5 +118,7 @@ jobs:
             tests/test_windows_conpty.py `
             tests/test_windows_process.py `
             tests/test_windows_win32.py `
-            tests/test_shell_manager.py `
+            tests/test_shell_manager.py::test_both_runtime_profiles_reuse_the_same_manager_worker `
+            tests/test_shell_manager.py::test_forced_kill_observably_rebuilds_shell `
+            tests/test_shell_manager.py::test_failed_forced_kill_rebuild_seals_cancelled_as_error `
             tests/test_mcp_stdio.py

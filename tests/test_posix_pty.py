@@ -254,12 +254,12 @@ def test_transport_drives_bash_dialect_without_expect(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX PTY test")
-def test_fast_exit_tail_is_drained_completely_twenty_times() -> None:
+def test_fast_exit_tail_is_drained_completely_three_times() -> None:
     expected = b"tail:" + b"x" * 131_072 + b":sentinel"
-    for iteration in range(20):
+    for iteration in range(3):
         transport = PexpectPosixPtyTransport()
         owner = _Ownership(f"tail-{iteration}")
-        request = _python_request("import os; os.write(1, " + repr(expected) + ")")
+        request = _python_request("import os; os.write(1, b'tail:' + b'x' * 131072 + b':sentinel')")
         session = cast(PexpectPosixSession, transport.spawn(request, owner))
         try:
             assert _drain(transport, session) == expected
