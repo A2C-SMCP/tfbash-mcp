@@ -7,6 +7,7 @@ import getpass
 import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -401,5 +402,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def cli(argv: Sequence[str] | None = None) -> int:
+    try:
+        return main(argv)
+    except LabError as error:
+        print(f"Windows supervisor lab error: {error}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

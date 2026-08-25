@@ -148,6 +148,31 @@ def test_marked_json_uses_last_complete_envelope() -> None:
     assert parse_marked_json(output) == {"value": 7}
 
 
+def test_marked_json_accepts_exact_powershell_clixml_header() -> None:
+    output = f'{JSON_BEGIN}\n#< CLIXML\n{{"value": 7}}\n{JSON_END}\n<Objs />'
+
+    assert parse_marked_json(output) == {"value": 7}
+
+
+def test_marked_json_extracts_unique_object_from_powershell_progress_clixml() -> None:
+    output = (
+        f'{JSON_BEGIN}\n#< CLIXML\n{{"value": 7}}\n'
+        f'<Objs Version="1.1.0.1"><Obj S="progress" /></Objs>\n{JSON_END}'
+    )
+
+    assert parse_marked_json(output) == {"value": 7}
+
+
+def test_marked_json_rejects_ambiguous_clixml_objects() -> None:
+    output = (
+        f'{JSON_BEGIN}\n#< CLIXML\n{{"value": 7}}\n{{"value": 8}}\n'
+        f'<Objs Version="1.1.0.1" />\n{JSON_END}'
+    )
+
+    with pytest.raises(LabError, match="invalid"):
+        parse_marked_json(output)
+
+
 def test_ssh_authentication_stops_matching_prompts_after_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -306,6 +331,9 @@ def test_windows_toolchain_is_fully_mac_supplied_and_runner_stays_offline() -> N
         encoding="utf-8"
     )
     assert "Invoke-WebRequest" not in bootstrap
+    assert 'Filter "__pycache__"' in bootstrap
+    assert 'Filter "*.pyc"' in bootstrap
+    assert '$env:PYTHONDONTWRITEBYTECODE = "1"' in bootstrap
     assert "uv run" not in runner
     assert "& $PythonPath -c $pythonLauncher" in runner
 

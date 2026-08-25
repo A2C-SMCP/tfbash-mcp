@@ -299,6 +299,19 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
             raise ProbeError("grandchild PID marker was not observed")
         grandchild_pid = int(match.group(1))
         diagnostics["grandchild_pid"] = grandchild_pid
+        before_cleanup_marker = f"TFBASH_BEFORE_CLEANUP_{iteration}".encode()
+        before_cleanup_output, before_cleanup_exit = _protocol_command(
+            transport,
+            managed.session,
+            plan.protocol,
+            f"[Console]::Out.WriteLine('{before_cleanup_marker.decode()}')",
+            time.monotonic() + 10,
+        )
+        diagnostics["before_cleanup_probe"] = {
+            "exit_code": before_cleanup_exit,
+            "marker_observed": before_cleanup_marker in before_cleanup_output,
+            "job_pids": list(_job_ids(ownership)),
+        }
         checks["grandchild_in_job"] = grandchild_pid in _job_ids(ownership) and _member(
             ownership, grandchild_pid
         )
@@ -307,6 +320,19 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
             cleanup.reaped and cleanup.remaining_managed_processes == 0
         )
         checks["shell_survived_execution_cleanup"] = supervisor.is_alive(ownership)
+        after_cleanup_marker = f"TFBASH_AFTER_CLEANUP_{iteration}".encode()
+        after_cleanup_output, after_cleanup_exit = _protocol_command(
+            transport,
+            managed.session,
+            plan.protocol,
+            f"[Console]::Out.WriteLine('{after_cleanup_marker.decode()}')",
+            time.monotonic() + 10,
+        )
+        diagnostics["after_cleanup_probe"] = {
+            "exit_code": after_cleanup_exit,
+            "marker_observed": after_cleanup_marker in after_cleanup_output,
+            "job_pids": list(_job_ids(ownership)),
+        }
 
         interrupt_start = f"TFBASH_INTERRUPT_START_{iteration}"
         interrupt_command = (

@@ -823,13 +823,34 @@ def parse_marked_json(output: str) -> dict[str, object]:
     if start < 0 or end <= start:
         raise LabError("remote output did not contain a complete JSON envelope")
     raw = output[start + len(JSON_BEGIN) : end].strip()
+    if raw.startswith("#< CLIXML"):
+        raw = raw.removeprefix("#< CLIXML").strip()
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise LabError("remote JSON envelope was invalid") from error
+        payload = _json_line_from_clixml(raw)
+        if payload is None:
+            raise LabError(
+                "remote JSON envelope was invalid: " + _remote_failure_details(output)
+            ) from error
     if not isinstance(payload, dict):
         raise LabError("remote JSON envelope must contain an object")
     return cast(dict[str, object], payload)
+
+
+def _json_line_from_clixml(raw: str) -> object | None:
+    if "<Objs " not in raw and "#< CLIXML" not in raw:
+        return None
+    candidates: list[object] = []
+    for line in raw.splitlines():
+        candidate = line.strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            candidates.append(json.loads(candidate))
+        except json.JSONDecodeError:
+            continue
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def new_run_id() -> str:

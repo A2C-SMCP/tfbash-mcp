@@ -13,5 +13,5 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 if __name__ == "__main__":
     module = import_module("experiments.windows_supervisor_native.lab")
-    main = cast(Callable[[], int], module.main)
-    raise SystemExit(main())
+    cli = cast(Callable[[], int], module.cli)
+    raise SystemExit(cli())

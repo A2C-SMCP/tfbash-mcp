@@ -15,6 +15,28 @@ $pythonSha256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c
 $pywinptyVersion = "3.0.5"
 $pywinptySha256 = "d62946adf14b15b54c0b8d785f93fe18b04da23f4ad59e2e8c4612646e9abd23"
 
+function Remove-StagingDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    foreach ($attempt in 1..5) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -eq 5) {
+                throw
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+}
+
 function Install-VerifiedArchive {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -69,7 +91,7 @@ function Install-VerifiedArchive {
     }
     finally {
         if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Recurse -Force
+            Remove-StagingDirectory -Path $temporary
         }
     }
 }
@@ -117,6 +139,15 @@ function Install-VerifiedPythonEnvironment {
             throw "Python destination is not a directory: $Destination"
         }
 
+        # Python metadata imports can create bytecode after a successful first
+        # bootstrap. Remove only generated caches inside this pinned tool root
+        # before enforcing an otherwise exact installed-tree comparison.
+        Get-ChildItem -LiteralPath $Destination -Directory -Filter "__pycache__" -Recurse |
+            Sort-Object { $_.FullName.Length } -Descending |
+            Remove-Item -Recurse -Force
+        Get-ChildItem -LiteralPath $Destination -File -Filter "*.pyc" -Recurse |
+            Remove-Item -Force
+
         $referenceFiles = @(Get-ChildItem -LiteralPath $temporary -File -Recurse)
         $installedFiles = @(Get-ChildItem -LiteralPath $Destination -File -Recurse)
         if ($referenceFiles.Count -ne $installedFiles.Count) {
@@ -137,7 +168,7 @@ function Install-VerifiedPythonEnvironment {
     }
     finally {
         if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Recurse -Force
+            Remove-StagingDirectory -Path $temporary
         }
     }
 }
@@ -170,7 +201,14 @@ Install-VerifiedPythonEnvironment -Destination $pythonRoot
 $uvObserved = (& cmd.exe /d /c ('"' + $uvPath + '" --version') 2>&1 | Out-String).Trim()
 $powerShellObserved = (& $powerShellPath -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1 | Out-String).Trim()
 $pythonObserved = (& cmd.exe /d /c ('"' + $pythonPath + '" --version') 2>&1 | Out-String).Trim()
-$pywinptyObserved = (& cmd.exe /d /c ('"' + $pythonPath + '" -c "import importlib.metadata; print(importlib.metadata.version(''pywinpty''))"') 2>&1 | Out-String).Trim()
+$previousBytecodePreference = $env:PYTHONDONTWRITEBYTECODE
+try {
+    $env:PYTHONDONTWRITEBYTECODE = "1"
+    $pywinptyObserved = (& cmd.exe /d /c ('"' + $pythonPath + '" -c "import importlib.metadata; print(importlib.metadata.version(''pywinpty''))"') 2>&1 | Out-String).Trim()
+}
+finally {
+    $env:PYTHONDONTWRITEBYTECODE = $previousBytecodePreference
+}
 if ($uvObserved -notmatch '^uv 0\.8\.17(?:\s|$)') {
     throw "Unexpected uv version: $uvObserved"
 }
