@@ -710,6 +710,46 @@ def test_shell_cleanup_waits_for_asynchronous_job_termination_without_rekilling_
     assert api.terminated_jobs == [1]
 
 
+def test_cleanup_after_forced_job_kill_waits_for_transient_live_root() -> None:
+    class TransientRootAfterJobKillApi(_FakeApi):
+        def terminate_job(self, job: object, exit_code: int) -> None:
+            assert exit_code == 1
+            self.terminated_jobs.append(cast(int, job))
+
+        def job_process_ids(
+            self,
+            job: object,
+            *,
+            deadline: float | None = None,
+        ) -> tuple[int, ...]:
+            if self.terminated_jobs:
+                return ()
+            return super().job_process_ids(job, deadline=deadline)
+
+        def terminate_process(self, process: WindowsProcessHandle, exit_code: int) -> None:
+            if self.terminated_jobs and process.identity.process_id == 100:
+                raise AssertionError("forced Job kill must not re-terminate the root")
+            super().terminate_process(process, exit_code)
+
+        def wait_processes(
+            self,
+            processes: tuple[WindowsProcessHandle, ...],
+            timeout_ms: int,
+        ) -> bool:
+            for process in processes:
+                current = self._matching(process)
+                if current is not None:
+                    current.alive = False
+            return super().wait_processes(processes, timeout_ms)
+
+    supervisor, ownership, api = _attached(api=TransientRootAfterJobKillApi())
+
+    assert supervisor.control(ownership, ControlIntent.KILL).delivered
+    assert api.processes[100].alive
+    assert supervisor.cleanup(ownership, deadline_ms=100).reaped
+    assert api.terminated_jobs == [1]
+
+
 def test_zero_deadline_and_stuck_job_retain_ownership_for_retry() -> None:
     supervisor, ownership, api = _attached()
     api.add_process(200, parent_id=100)

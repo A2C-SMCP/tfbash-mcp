@@ -156,6 +156,7 @@ class WindowsProcessOwnership:
         self._attachment_indeterminate = False
         self._attached = False
         self._interrupt_sender: InterruptSender | None = None
+        self._job_termination_requested = False
         self._finalized = False
 
     @property
@@ -421,6 +422,7 @@ class WindowsProcessOwnership:
             job = self._job
             if job is not None and self._api.process_is_in_job(job, root):
                 self._api.terminate_job(job, 1)
+                self._job_termination_requested = True
             if self._api.process_is_alive(root):
                 self._api.terminate_process(root, 1)
                 self._api.wait_processes((root,), self._attach_cleanup_timeout_ms)
@@ -588,6 +590,7 @@ class WindowsProcessSupervisor:
                 return ControlDelivery(delivered=False)
             self._check_control_deadline(deadline)
             concrete._api.terminate_job(concrete._require_job(), 1)
+            concrete._job_termination_requested = True
             return ControlDelivery(delivered=True)
 
     def is_alive(self, ownership: ProcessOwnership) -> bool:
@@ -693,8 +696,11 @@ class WindowsProcessSupervisor:
                 job_has_processes = bool(self._job_process_ids(concrete, deadline=deadline))
                 if job_has_processes:
                     concrete._api.terminate_job(job, 1)
+                    concrete._job_termination_requested = True
                     self._check_deadline(deadline)
-                elif concrete._api.process_is_alive(root):
+                elif not concrete._job_termination_requested and concrete._api.process_is_alive(
+                    root
+                ):
                     concrete._api.terminate_process(root, 1)
                     self._check_deadline(deadline)
                 while True:
