@@ -110,7 +110,17 @@ class LabConfig:
 
     @classmethod
     def from_env_file(cls, path: Path, *, repository_root: Path) -> LabConfig:
-        values = load_env_file(path)
+        return cls.from_values(load_env_file(path), repository_root=repository_root)
+
+    @classmethod
+    def from_values(
+        cls,
+        values: Mapping[str, str],
+        *,
+        repository_root: Path,
+    ) -> LabConfig:
+        """Validate connection values from a secret file or one-time prompt."""
+
         required = {
             "TFBASH_WINDOWS_HOST",
             "TFBASH_WINDOWS_USER",

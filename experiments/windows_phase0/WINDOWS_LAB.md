@@ -53,6 +53,15 @@ uv run --group windows-lab python scripts/windows_lab.py --env-file .env run --r
 uv run --group windows-lab python scripts/windows_lab.py verify artifacts/windows-lab/TARGET/runs/RUN/result.zip
 ```
 
+For a one-off target, no `.env` is required. Connection settings may be passed
+as non-secret flags and the password is read from a hidden prompt; it is never
+placed in argv or shell history:
+
+```shell
+uv run --group windows-lab python scripts/windows_supervisor_lab.py \
+  --host 192.168.50.215 --port 23 --user llg --repetitions 1
+```
+
 The remote layout is isolated under `TFBASH_WINDOWS_REMOTE_ROOT`. The pinned
 toolchain includes portable PowerShell 7.6.3, uv 0.8.17, CPython 3.12.10 x64,
 and the pywinpty 3.0.5 CPython 3.12 x64 wheel. The Mac downloads and verifies
@@ -81,3 +90,42 @@ native gate.
 
 The deterministic handoff still includes `RUN_WINDOWS11.ps1` for that final
 gate. It is the only script allowed to request `native-gate` evidence.
+
+## Issue #15 supervisor candidate
+
+The #15 verifier has its own package and evidence schema. It packages the full
+`src/tfbash_mcp` tree and the probe from an exact Git commit, deploys it through
+the same offline SSH toolchain, and runs the production
+`WindowsProcessSupervisor`, `ConPtyTransport`, and `PowerShellDialect` together.
+It does not enable the fail-closed production builder.
+
+Run a replaceable-host smoke from the Mac with either connection mode:
+
+```shell
+uv run --group windows-lab python scripts/windows_supervisor_lab.py \
+  --env-file .env --source-ref feature/issue-15-windows-native-gate \
+  --repetitions 3
+```
+
+The controller performs preflight, pinned/offline bootstrap, deterministic
+deployment, SSH execution, collection, and local evidence recomputation. Use
+`--skip-bootstrap` only after the same remote root has already passed bootstrap.
+The 1–5 repetition SSH result may prove that the candidate works on that host,
+but it remains `decision=inconclusive` by contract.
+
+Each repetition independently checks:
+
+- the trusted bootstrap and real PowerShell are members of the pre-created Job;
+- a rapidly created grandchild cannot escape the Job;
+- execution cleanup removes descendants while preserving the persistent Shell;
+- ConPTY Ctrl-C is delivered and the same Shell accepts the next command;
+- quick command tail output and exit code 37 both survive framing/finalization;
+- Shell close and Job cleanup leave no tracked process alive.
+
+The extracted package also contains
+`experiments/windows_supervisor_native/RUN_WINDOWS11_SUPERVISOR.ps1`. The formal
+native gate is hard-coded to exactly 20 repetitions and is the only path that
+can produce `decision_ready=true`. An engineer is needed only if the target's
+policy blocks SSH/user-scoped execution or if the final interactive desktop
+impact check is required; ordinary installation, smoke execution, collection,
+and verification stay Mac-controlled.
