@@ -74,6 +74,15 @@ def _native_default_shell() -> str:
     return _default_shell(_default_platform())
 
 
+def _is_native_absolute_path(value: str, platform: PlatformName) -> bool:
+    if platform is PlatformName.WINDOWS:
+        normalized = value.replace("/", "\\")
+        if normalized.startswith("\\\\.\\"):
+            return False
+        return PureWindowsPath(value).is_absolute()
+    return PurePosixPath(value).is_absolute()
+
+
 @dataclass(frozen=True, slots=True)
 class ProtocolConfig:
     """Runtime facts and limits needed to resolve and validate wire values."""
@@ -104,9 +113,8 @@ class ProtocolConfig:
             raise ValueError("command_yield_ms must be between 0 and 60000")
         if not 1 <= self.command_timeout_ms <= 86_400_000:
             raise ValueError("command_timeout_ms must be between 1 and 86400000")
-        path_type = PureWindowsPath if self.platform is PlatformName.WINDOWS else PurePosixPath
         for name, value in (("default_cwd", self.default_cwd), ("shell", self.shell)):
-            if "\x00" in value or not path_type(value).is_absolute():
+            if "\x00" in value or not _is_native_absolute_path(value, self.platform):
                 raise ValueError(f"{name} must be an absolute {self.platform.value} path")
         if self.startup_command is not None:
             if not self.startup_command or "\x00" in self.startup_command:
@@ -170,8 +178,7 @@ def _identifier(value: str) -> str:
 def _native_absolute_path(value: str, info: ValidationInfo) -> str:
     _without_nul(value)
     platform = _protocol_config(info).platform
-    path = PureWindowsPath(value) if platform is PlatformName.WINDOWS else PurePosixPath(value)
-    if not path.is_absolute():
+    if not _is_native_absolute_path(value, platform):
         raise ValueError(f"must be an absolute {platform.value} path")
     return value
 
@@ -846,8 +853,12 @@ def _validate_native_absolute_path(
 ) -> Iterator[JsonSchemaValidationError]:
     if not isinstance(instance, str) or not isinstance(platform, str):
         return
-    path_type = PureWindowsPath if platform == PlatformName.WINDOWS.value else PurePosixPath
-    if not path_type(instance).is_absolute():
+    try:
+        platform_name = PlatformName(platform)
+    except ValueError:
+        yield JsonSchemaValidationError(f"unknown native platform {platform}")
+        return
+    if not _is_native_absolute_path(instance, platform_name):
         yield JsonSchemaValidationError(f"value must be an absolute {platform} path")
 
 

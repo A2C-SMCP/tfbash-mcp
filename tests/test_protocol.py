@@ -406,6 +406,15 @@ def test_platform_native_absolute_paths_are_contextual() -> None:
 
     with pytest.raises(ProtocolValidationError, match="absolute windows path"):
         validate_tool_input(ToolName.SHELL_OPEN, {"cwd": "/workspace"}, config=WINDOWS_CONFIG)
+    for device_path in (r"\\.\COM1", "//./COM1"):
+        with pytest.raises(ProtocolValidationError, match="absolute windows path"):
+            validate_tool_input(
+                ToolName.SHELL_OPEN,
+                {"cwd": device_path},
+                config=WINDOWS_CONFIG,
+            )
+        with pytest.raises(JsonSchemaValidationError):
+            _validate_schema(windows_schema, {"cwd": device_path})
     with pytest.raises(ProtocolValidationError, match="absolute macos path"):
         validate_tool_input(
             ToolName.SHELL_OPEN,
