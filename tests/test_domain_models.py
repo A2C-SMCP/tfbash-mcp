@@ -123,7 +123,6 @@ def test_completion_flushes_incomplete_utf8_and_eof_tracks_read_window() -> None
         (ExecutionState.EXITED, ShellState.ERROR, 0),
         (ExecutionState.EXITED, ShellState.READY, None),
         (ExecutionState.TIMEOUT, ShellState.READY, 1),
-        (ExecutionState.CANCELLED, ShellState.READY, None),
         (ExecutionState.SHELL_ERROR, ShellState.READY, None),
     ],
 )
@@ -138,8 +137,8 @@ def test_invalid_terminal_state_matrix_is_rejected(
         )
 
 
-def test_shell_rebuilt_is_reserved_for_timeout_recovery() -> None:
-    with pytest.raises(InvalidTransition, match="only for timeout"):
+def test_shell_rebuilt_is_reserved_for_disruption_recovery() -> None:
+    with pytest.raises(InvalidTransition, match="timeout or forced-kill"):
         _execution(FakeClock()).complete(
             ExecutionState.EXITED,
             shell_status=ShellState.READY,
@@ -154,6 +153,14 @@ def test_shell_rebuilt_is_reserved_for_timeout_recovery() -> None:
         shell_rebuilt=True,
     )
     assert execution.snapshot(cursor=0, max_bytes=4).shell_rebuilt is True
+
+    killed = _execution(FakeClock())
+    assert killed.complete(
+        ExecutionState.CANCELLED,
+        shell_status=ShellState.READY,
+        shell_rebuilt=True,
+    )
+    assert killed.snapshot(cursor=0, max_bytes=4).shell_rebuilt is True
 
 
 def test_shell_enforces_single_active_execution_and_normal_completion() -> None:

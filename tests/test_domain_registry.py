@@ -70,6 +70,30 @@ def _finish(registry: ShellRegistry, shell_id: str, exec_id: str) -> None:
     )
 
 
+def test_registry_retains_forced_kill_completion_on_ready_shell() -> None:
+    registry = _registry(FakeClock())
+    shell = registry.create_shell(cwd="/one")
+    execution = registry.start_execution(shell.shell_id, max_output_bytes=64)
+
+    assert registry.finish_execution(
+        shell.shell_id,
+        execution.exec_id,
+        ExecutionState.CANCELLED,
+        next_shell_state=ShellState.READY,
+        cwd="/rebuilt",
+        shell_rebuilt=True,
+    )
+
+    completed = registry.get_execution(shell.shell_id, execution.exec_id).snapshot(
+        cursor=0,
+        max_bytes=64,
+    )
+    assert completed.status is ExecutionState.CANCELLED
+    assert completed.shell_status is ShellState.READY
+    assert completed.shell_rebuilt is True
+    assert registry.get_shell(shell.shell_id).state is ShellState.READY
+
+
 def test_registry_capacity_identity_and_close_reuse() -> None:
     clock = FakeClock()
     registry = _registry(clock)
@@ -142,13 +166,6 @@ def test_close_cancellation_wins_and_late_completion_is_noop() -> None:
     assert registry.begin_close(shell.shell_id) is execution
     with pytest.raises(ShellClosing):
         registry.get_execution(shell.shell_id, execution.exec_id)
-    with pytest.raises(InvalidTransition, match="cancel_active_for_close"):
-        registry.finish_execution(
-            shell.shell_id,
-            execution.exec_id,
-            ExecutionState.CANCELLED,
-            next_shell_state=ShellState.READY,
-        )
     assert execution.state.value == "running"
     assert registry.cancel_active_for_close(shell.shell_id) is True
     assert registry.prune_completed() == ()
