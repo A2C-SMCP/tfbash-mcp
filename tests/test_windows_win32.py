@@ -114,3 +114,10 @@ def test_child_readiness_requires_a_signaled_named_event() -> None:
     assert not pending.child_gate_is_ready(r"Local\tfbash-mcp-token-child-42-100")
     assert signaled_kernel.closed == [2468]
     assert pending_kernel.closed == [2468]
+
+
+def test_missing_process_falls_back_to_errno_when_winerror_is_none() -> None:
+    error = OSError(87, "process is gone")
+
+    assert getattr(error, "winerror", None) is None
+    assert CtypesWindowsProcessApi._missing_process(error)
