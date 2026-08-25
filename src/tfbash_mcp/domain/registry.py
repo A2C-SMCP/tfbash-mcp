@@ -105,9 +105,7 @@ class ShellRegistry:
             self._prune_completed()
             execution = self._completed.get(exec_id)
             if execution is None or execution.shell_id != shell_id:
-                raise ExecutionNotFound(
-                    f"execution {exec_id} was not found for shell {shell_id}"
-                )
+                raise ExecutionNotFound(f"execution {exec_id} was not found for shell {shell_id}")
             return execution
 
     def finish_execution(
@@ -131,9 +129,7 @@ class ShellRegistry:
                 closing = self._closing_executions.get(exec_id)
                 if closing is not None and closing.shell_id == shell_id:
                     return False
-                raise ExecutionNotFound(
-                    f"execution {exec_id} was not found for shell {shell_id}"
-                )
+                raise ExecutionNotFound(f"execution {exec_id} was not found for shell {shell_id}")
             won = shell.finish_execution(
                 exec_id,
                 state,

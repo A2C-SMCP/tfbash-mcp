@@ -99,9 +99,7 @@ def test_every_tool_has_strict_input_and_output_schema(platform: PlatformName) -
         _assert_model_objects_are_closed(contract["outputSchema"])
         _assert_model_objects_are_closed(contract["errorSchema"])
 
-    write_schema = cast(
-        dict[str, Any], contracts[ToolName.SHELL_WRITE.value]["inputSchema"]
-    )
+    write_schema = cast(dict[str, Any], contracts[ToolName.SHELL_WRITE.value]["inputSchema"])
     assert "oneOf" in write_schema
     assert len(write_schema["oneOf"]) == 2
     assert "eof" not in json.dumps(write_schema)
@@ -122,9 +120,7 @@ def test_real_json_schema_enforces_wire_input_constraints() -> None:
 
     _validate_schema(open_schema, {"cwd": "/tmp", "env": {"OK": "yes"}})
     _validate_schema(exec_schema, {"shell_id": "s", "command": "true"})
-    _validate_schema(
-        write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "AA=="}
-    )
+    _validate_schema(write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "AA=="})
 
     invalid_pairs = [
         (open_schema, {"cwd": "relative"}),
@@ -399,9 +395,7 @@ def test_platform_native_absolute_paths_are_contextual() -> None:
     assert isinstance(windows, ShellOpenInput)
     assert windows.cwd == r"C:\work\project"
 
-    windows_schema = tool_contract_schemas(WINDOWS_CONFIG)[ToolName.SHELL_OPEN.value][
-        "inputSchema"
-    ]
+    windows_schema = tool_contract_schemas(WINDOWS_CONFIG)[ToolName.SHELL_OPEN.value]["inputSchema"]
     for unc_path in (r"\\server\share", "//server/share"):
         unc_result = validate_tool_input(
             ToolName.SHELL_OPEN, {"cwd": unc_path}, config=WINDOWS_CONFIG
@@ -698,9 +692,7 @@ def test_shell_open_and_list_results_expose_only_runtime_context() -> None:
         ("error", None),
     ],
 )
-def test_shell_list_active_execution_invariant(
-    status: str, active_exec_id: str | None
-) -> None:
+def test_shell_list_active_execution_invariant(status: str, active_exec_id: str | None) -> None:
     item = ShellListItem.model_validate(
         {
             "shell_id": "shell_1",
@@ -880,8 +872,7 @@ def test_platform_specific_schema_defaults_and_exit_code_maximum() -> None:
 
     assert posix["shell_open"]["inputSchema"]["properties"]["cwd"]["default"] == "/workspace"
     assert (
-        windows["shell_open"]["inputSchema"]["properties"]["cwd"]["default"]
-        == r"C:\work\project"
+        windows["shell_open"]["inputSchema"]["properties"]["cwd"]["default"] == r"C:\work\project"
     )
     for tool in ["shell_exec", "shell_read"]:
         posix_exited = posix[tool]["outputSchema"]["$defs"]["ExitedExecutionSnapshot"]

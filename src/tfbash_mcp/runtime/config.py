@@ -47,9 +47,7 @@ class EnvironmentSummary:
         if self.name is not None:
             _validate_utf8(self.name, label="environment name")
             if not self.name.strip() or "\x00" in self.name:
-                raise RuntimeConfigurationError(
-                    "environment name must be non-empty and NUL-free"
-                )
+                raise RuntimeConfigurationError("environment name must be non-empty and NUL-free")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +66,7 @@ class HostConfig:
 
     def __post_init__(self) -> None:
         windows = self.platform is NativePlatform.WINDOWS
-        expected_runtime = (
-            RuntimeName.WINDOWS_PWSH if windows else RuntimeName.POSIX_BASH
-        )
+        expected_runtime = RuntimeName.WINDOWS_PWSH if windows else RuntimeName.POSIX_BASH
         if self.runtime_profile is not expected_runtime:
             raise RuntimeConfigurationError("native platform and Runtime Profile must match")
         for label, value in (
@@ -87,9 +83,7 @@ class HostConfig:
         if self.startup_command is not None:
             _validate_utf8(self.startup_command, label="startup command")
             if not self.startup_command or "\x00" in self.startup_command:
-                raise RuntimeConfigurationError(
-                    "startup command must be non-empty and NUL-free"
-                )
+                raise RuntimeConfigurationError("startup command must be non-empty and NUL-free")
         _validate_environment(
             self.environment,
             windows=windows,
@@ -242,9 +236,7 @@ class RuntimeComposition:
         if startup_command is not None:
             _validate_utf8(startup_command, label="startup command")
             if not startup_command or "\x00" in startup_command:
-                raise RuntimeConfigurationError(
-                    "startup command must be non-empty and NUL-free"
-                )
+                raise RuntimeConfigurationError("startup command must be non-empty and NUL-free")
         environment = _merge_environment(
             self.host.environment,
             explicit.environment or {},
@@ -313,14 +305,10 @@ def resolve_runtime(selection: RuntimeSelection, *, operating_system: str) -> Ru
         )
     selected = RuntimeName(selection.value)
     expected = (
-        RuntimePlatform.WINDOWS
-        if selected is RuntimeName.WINDOWS_PWSH
-        else RuntimePlatform.POSIX
+        RuntimePlatform.WINDOWS if selected is RuntimeName.WINDOWS_PWSH else RuntimePlatform.POSIX
     )
     if platform is not expected:
-        raise RuntimeConfigurationError(
-            f"{selected.value} is incompatible with {operating_system}"
-        )
+        raise RuntimeConfigurationError(f"{selected.value} is incompatible with {operating_system}")
     return selected
 
 
