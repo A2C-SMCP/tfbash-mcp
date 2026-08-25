@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 $actualPackageSha256 = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualPackageSha256 -ne $ExpectedPackageSha256) {
     throw "Package checksum mismatch: $actualPackageSha256"

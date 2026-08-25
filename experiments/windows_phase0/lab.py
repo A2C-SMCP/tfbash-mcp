@@ -931,7 +931,8 @@ $processArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArch
 
 def _marked_script(body: str) -> str:
     return (
-        f"$ErrorActionPreference='Stop'; Write-Output '{JSON_BEGIN}'; "
+        "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';"
+        f"Write-Output '{JSON_BEGIN}'; "
         f"{body}; Write-Output '{JSON_END}'"
     )
 
