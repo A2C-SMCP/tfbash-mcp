@@ -119,20 +119,19 @@ def _protocol_command(
     return bytes(output), exit_code
 
 
-def _begin_protocol_command(
+def _begin_long_protocol_command(
     transport: Any,
     session: Any,
     protocol: Any,
     command: str,
-    marker: bytes,
     deadline: float,
 ) -> str:
     from tfbash_mcp.runtime import DialectEventKind, ReadStatus, WaitInterest
 
     frame = protocol.wrap_command(command)
     _write_all(transport, session, frame.input_bytes, deadline)
-    output = bytearray()
-    while time.monotonic() < deadline:
+    observation_deadline = min(deadline, time.monotonic() + 0.25)
+    while time.monotonic() < observation_deadline:
         transport.wait(session, frozenset({WaitInterest.READABLE}), 50)
         result = transport.read(session, 65_536)
         if result.status is ReadStatus.EOF:
@@ -140,11 +139,12 @@ def _begin_protocol_command(
         if result.status is not ReadStatus.DATA:
             continue
         for event in protocol.feed(result.data):
-            if event.kind is DialectEventKind.OUTPUT:
-                output.extend(event.data)
-        if marker in output:
-            return frame.correlation_id
-    raise ProbeError("PowerShell interrupt target did not produce its start marker")
+            if (
+                event.kind is DialectEventKind.COMMAND_COMPLETE
+                and event.correlation_id == frame.correlation_id
+            ):
+                raise ProbeError("PowerShell interrupt target completed before control delivery")
+    return frame.correlation_id
 
 
 def _recover_protocol_command(
@@ -326,17 +326,12 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
             "job_pids": list(_job_ids(ownership)),
         }
 
-        interrupt_start = f"TFBASH_INTERRUPT_START_{iteration}"
-        interrupt_command = (
-            f"Write-Output '{interrupt_start}';"
-            "Start-Sleep -Seconds 60;[Console]::Out.WriteLine('INTERRUPT_MISSED')"
-        )
-        correlation_id = _begin_protocol_command(
+        interrupt_command = "Start-Sleep -Seconds 60;[Console]::Out.WriteLine('INTERRUPT_MISSED')"
+        correlation_id = _begin_long_protocol_command(
             transport,
             managed.session,
             plan.protocol,
             interrupt_command,
-            interrupt_start.encode(),
             time.monotonic() + 10,
         )
         delivery = supervisor.control(ownership, ControlIntent.INTERRUPT, deadline_ms=2_000)
