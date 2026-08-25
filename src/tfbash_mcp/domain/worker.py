@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from tfbash_mcp.runtime.errors import (
     TransportError,
 )
 from tfbash_mcp.runtime.profile import ManagedRuntimeSession, RuntimeProfile
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,6 +826,10 @@ class ShellWorker:
                     )
             raise
         except Exception:
+            _LOGGER.exception(
+                "Shell rebuild failed after %s",
+                terminal_state.value,
+            )
             if self._managed is not previous:
                 with suppress(RuntimeBoundaryError):
                     self._cleanup_managed(
