@@ -231,16 +231,16 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
         transport=transport,
         supervisor=supervisor,
     )
-    plan = dialect.prepare_session(
-        ShellStartRequest(
-            executable=pwsh,
-            cwd=str(Path.cwd()),
-            environment=dict(os.environ),
-            startup_command=None,
-        )
+    start_request = ShellStartRequest(
+        executable=pwsh,
+        cwd=str(Path.cwd()),
+        environment=dict(os.environ),
+        startup_command=None,
     )
+    plan = dialect.prepare_session(start_request)
     managed: Any = None
     tracked_pids: tuple[int, ...] = ()
+    prior_cleanup_clear = True
     try:
         managed = profile.open_session(
             plan.launch.spawn,
@@ -336,13 +336,39 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
         )
         delivery = supervisor.control(ownership, ControlIntent.INTERRUPT, deadline_ms=2_000)
         checks["interrupt_delivered"] = delivery.delivered
-        checks["shell_recovered_after_interrupt"] = _recover_protocol_command(
-            transport,
-            managed.session,
-            plan.protocol,
-            correlation_id,
-            time.monotonic() + 10,
-        ) and supervisor.is_alive(ownership)
+        try:
+            checks["shell_recovered_after_interrupt"] = _recover_protocol_command(
+                transport,
+                managed.session,
+                plan.protocol,
+                correlation_id,
+                time.monotonic() + 10,
+            ) and supervisor.is_alive(ownership)
+            diagnostics["interrupt_recovery"] = "same-shell"
+        except Exception as recovery_error:
+            diagnostics["same_shell_recovery_error"] = (
+                f"{type(recovery_error).__name__}: {recovery_error}"
+            )
+            old_pids = _job_ids(ownership)
+            transport.close(managed.session, deadline_ms=5_000)
+            old_cleanup = supervisor.cleanup(ownership, deadline_ms=5_000)
+            prior_cleanup_clear = old_cleanup.reaped and all(
+                _process_is_dead(ownership, process_id) for process_id in old_pids
+            )
+            diagnostics["rebuild_old_job_reaped"] = prior_cleanup_clear
+            managed = None
+            plan = dialect.prepare_session(start_request)
+            managed = profile.open_session(
+                plan.launch.spawn,
+                cleanup_deadline_ms=5_000,
+                startup_deadline_ms=10_000,
+            )
+            ownership = managed.ownership
+            _await_ready(transport, managed.session, plan, time.monotonic() + 10)
+            checks["shell_recovered_after_interrupt"] = prior_cleanup_clear and supervisor.is_alive(
+                ownership
+            )
+            diagnostics["interrupt_recovery"] = "job-rebuild"
 
         tail_marker = f"TFBASH_TAIL_{iteration}".encode()
         tail_output, exit_code = _protocol_command(
@@ -357,8 +383,10 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
         tracked_pids = _job_ids(ownership)
         transport.close(managed.session, deadline_ms=5_000)
         cleanup = supervisor.cleanup(ownership, deadline_ms=5_000)
-        checks["shell_cleanup_zero_residue"] = cleanup.reaped and all(
-            _process_is_dead(ownership, process_id) for process_id in tracked_pids
+        checks["shell_cleanup_zero_residue"] = (
+            prior_cleanup_clear
+            and cleanup.reaped
+            and all(_process_is_dead(ownership, process_id) for process_id in tracked_pids)
         )
     except Exception as error:
         diagnostics["error"] = f"{type(error).__name__}: {error}"
