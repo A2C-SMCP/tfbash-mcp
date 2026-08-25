@@ -110,6 +110,7 @@ _GATE_TIMEOUT_ENV = "TFBASH_MCP_GATE_TIMEOUT_MS"
 _GATE_ENV_KEYS = frozenset(
     key.casefold() for key in (_GATE_NAME_ENV, _GATE_PAYLOAD_ENV, _GATE_TIMEOUT_ENV)
 )
+_INFRASTRUCTURE_STABLE_SECONDS = 0.1
 
 
 class _CleanupDeadlineExpired(Exception):
@@ -313,24 +314,47 @@ class WindowsProcessOwnership:
 
         job = self._require_job()
         trusted = {bootstrap.identity, shell.identity}
-        for process_id in self._api.job_process_ids(job, deadline=deadline):
+        capture_deadline = time.monotonic() + self._shell_ready_timeout_ms / 1000
+        if deadline is not None:
+            capture_deadline = min(capture_deadline, deadline)
+        stable_seconds = min(
+            _INFRASTRUCTURE_STABLE_SECONDS,
+            self._shell_ready_timeout_ms / 2000,
+        )
+        last_process_ids: tuple[int, ...] | None = None
+        stable_since = time.monotonic()
+        while True:
             if not self._release_allowed(deadline, cancel_signal):
                 raise ProcessControlError("Windows infrastructure capture was cancelled or expired")
-            if process_id in {
-                bootstrap.identity.process_id,
-                shell.identity.process_id,
-            }:
-                continue
-            process = self._api.open_process_if_alive(process_id)
-            if process is None:
-                continue
-            if process.identity in trusted or process.identity in self._infrastructure:
-                self._api.close_process(process)
-                continue
-            if not self._api.process_is_in_job(job, process):
-                self._api.close_process(process)
-                raise ProcessControlError("Windows infrastructure process escaped its Job Object")
-            self._infrastructure[process.identity] = process
+            now = time.monotonic()
+            if now >= capture_deadline:
+                raise ProcessControlError("Windows infrastructure capture expired")
+            process_ids = tuple(sorted(self._api.job_process_ids(job, deadline=capture_deadline)))
+            if process_ids != last_process_ids:
+                last_process_ids = process_ids
+                stable_since = now
+            for process_id in process_ids:
+                if process_id in {
+                    bootstrap.identity.process_id,
+                    shell.identity.process_id,
+                }:
+                    continue
+                process = self._api.open_process_if_alive(process_id)
+                if process is None:
+                    continue
+                if process.identity in trusted or process.identity in self._infrastructure:
+                    self._api.close_process(process)
+                    continue
+                if not self._api.process_is_in_job(job, process):
+                    self._api.close_process(process)
+                    raise ProcessControlError(
+                        "Windows infrastructure process escaped its Job Object"
+                    )
+                self._infrastructure[process.identity] = process
+            now = time.monotonic()
+            if now - stable_since >= stable_seconds:
+                return
+            time.sleep(min(0.005, capture_deadline - now))
 
     def _await_shell(
         self,

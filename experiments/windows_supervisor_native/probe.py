@@ -264,6 +264,9 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
             bootstrap_pid=bootstrap_pid,
             shell_pid=shell_pid,
             initial_job_pids=list(initial_ids),
+            infrastructure_pids=sorted(
+                identity.process_id for identity in ownership._infrastructure
+            ),
         )
         checks["bootstrap_in_job"] = bootstrap_pid in initial_ids and _member(
             ownership, bootstrap_pid
