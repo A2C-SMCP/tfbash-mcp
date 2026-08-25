@@ -202,6 +202,8 @@ class OpenSshTransport:
                 "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
+                "-OutputFormat",
+                "Text",
                 "-EncodedCommand",
                 encoded,
             ]

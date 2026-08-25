@@ -206,14 +206,6 @@ def _encoded(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _write_marker_script(marker: str) -> str:
-    encoded = base64.b64encode(marker.encode()).decode("ascii")
-    return (
-        "[Console]::Out.WriteLine([Text.Encoding]::UTF8.GetString("
-        f"[Convert]::FromBase64String('{encoded}')))"
-    )
-
-
 def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
     from tfbash_mcp.runtime import (
         ConPtyTransport,
@@ -336,7 +328,7 @@ def _run_iteration(iteration: int, pwsh: str) -> dict[str, object]:
 
         interrupt_start = f"TFBASH_INTERRUPT_START_{iteration}"
         interrupt_command = (
-            f"{_write_marker_script(interrupt_start)};"
+            f"Write-Output '{interrupt_start}';"
             "Start-Sleep -Seconds 60;[Console]::Out.WriteLine('INTERRUPT_MISSED')"
         )
         correlation_id = _begin_protocol_command(
