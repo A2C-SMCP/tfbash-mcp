@@ -1,6 +1,9 @@
 .DS_Store
 .idea/
 .vscode/
+.env
+.env.*
+!.env.example
 
 __pycache__/
 *.py[cod]
@@ -13,6 +16,7 @@ __pycache__/
 htmlcov/
 dist/
 build/
+artifacts/windows-lab/
 
 # Local research checkouts are large, contain nested repositories, and are not
 # part of the distributable project.

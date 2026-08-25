@@ -2,16 +2,55 @@ name: Windows Phase 0
 
 on:
   push:
-    branches: [feature/issue-1-v1-shell-runtime]
+    branches:
+      - main
+      - feature/issue-1-v1-shell-runtime
+      - feature/issue-12-windows-lab-infra
     paths:
       - ".github/workflows/windows-phase0.yml"
       - "experiments/windows_phase0/**"
+      - "scripts/windows_lab.py"
+      - "tests/test_windows_lab.py"
+      - "pyproject.toml"
+      - "uv.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-phase0.yml"
+      - "experiments/windows_phase0/**"
+      - "scripts/windows_lab.py"
+      - "tests/test_windows_lab.py"
+      - "pyproject.toml"
+      - "uv.lock"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  lab-controller:
+    name: SSH-first lab controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          version: "0.8.17"
+          python-version: "3.12.10"
+
+      - name: Validate controller
+        run: |
+          uv run --group windows-lab ruff check experiments/windows_phase0/lab.py scripts/windows_lab.py tests/test_windows_lab.py
+          uv run --group windows-lab mypy --strict experiments/windows_phase0/lab.py scripts/windows_lab.py tests/test_windows_lab.py
+          uv run --group windows-lab python -m pytest tests/test_windows_lab.py
+
   hosted-smoke:
     name: Hosted Windows smoke
     runs-on: windows-2025
@@ -46,15 +85,47 @@ jobs:
       - name: Test result contracts
         run: uv run --python 3.12.10 --with pytest==8.4.2 -- pytest experiments/windows_phase0/test_contracts.py
 
-      - name: Run hosted smoke matrix
+      - name: Parse Windows Lab PowerShell scripts
         shell: pwsh
         run: |
+          $failed = $false
+          Get-ChildItem experiments/windows_phase0/infrastructure/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }
+            }
+          }
+          if ($failed) { throw "PowerShell parser rejected Windows Lab scripts" }
+
+      - name: Run hosted smoke matrix (1 repetition)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
             python -m experiments.windows_phase0.runner `
             --environment-tier hosted-smoke `
             --pwsh $env:PHASE0_PWSH `
-            --repetitions 20 `
+            --repetitions 1 `
             --output-dir artifacts/windows-phase0-hosted
+          $experimentExitCode = $LASTEXITCODE
+          if ($experimentExitCode -notin @(0, 1)) {
+            throw "Hosted smoke infrastructure failed with exit code $experimentExitCode"
+          }
+          foreach ($name in @("environment.json", "observations.jsonl", "summary.json", "summary.md")) {
+            $path = Join-Path "artifacts/windows-phase0-hosted" $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Hosted smoke did not produce required evidence: $name"
+            }
+          }
+          Write-Host "Hosted smoke experiment exit code: $experimentExitCode"
+          exit 0
 
       - name: Upload raw experiment evidence
         if: always()

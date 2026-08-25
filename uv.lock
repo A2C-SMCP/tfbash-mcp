@@ -859,6 +859,9 @@ dev = [
     { name = "ruff" },
     { name = "types-jsonschema" },
 ]
+windows-lab = [
+    { name = "pexpect" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -877,6 +880,7 @@ dev = [
     { name = "ruff", specifier = ">=0.12.9,<0.13.0" },
     { name = "types-jsonschema", specifier = ">=4.25.0,<5.0.0" },
 ]
+windows-lab = [{ name = "pexpect", specifier = ">=4.9.0,<5.0.0" }]
 
 [[package]]
 name = "tomli"
