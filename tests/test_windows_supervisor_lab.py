@@ -85,19 +85,26 @@ def test_evaluator_recomputes_each_check_instead_of_trusting_summary() -> None:
         evaluate_evidence(payload)
 
 
-def test_verifier_binds_result_to_source_commit_and_keeps_ssh_inconclusive(
+@pytest.mark.parametrize(
+    ("tier", "repetitions", "decision_ready"),
+    [("hosted-smoke", 3, False), ("native-gate", 20, True)],
+)
+def test_verifier_binds_result_to_source_commit_and_recomputes_tier(
     tmp_path: Path,
+    tier: str,
+    repetitions: int,
+    decision_ready: bool,
 ) -> None:
-    evidence = _evidence()
+    evidence = _evidence(tier=tier, repetitions=repetitions)
     archive = tmp_path / "result.zip"
     metadata = {
         "schema": RESULT_SCHEMA,
         "run_id": "supervisor-test",
         "launch_channel": "ssh",
-        "evidence_tier": "hosted-smoke",
+        "evidence_tier": tier,
         "source_commit": "a" * 40,
         "package_sha256": "b" * 64,
-        "repetitions": 3,
+        "repetitions": repetitions,
         "evidence_complete": True,
     }
     with zipfile.ZipFile(archive, "w") as result:
@@ -110,7 +117,7 @@ def test_verifier_binds_result_to_source_commit_and_keeps_ssh_inconclusive(
 
     assert report.source_commit == "a" * 40
     assert report.decision.contract_passed
-    assert not report.decision.decision_ready
+    assert report.decision.decision_ready is decision_ready
 
 
 def test_verifier_rejects_source_commit_mismatch(tmp_path: Path) -> None:

@@ -7,10 +7,17 @@ param(
     [Parameter(Mandatory = $true)][string]$SourceCommit,
     [Parameter(Mandatory = $true)][string]$PackageSha256,
     [Parameter(Mandatory = $true)][string]$TargetName,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 5)][int]$Repetitions
+    [Parameter(Mandatory = $true)][ValidateSet("hosted-smoke", "native-gate")][string]$EvidenceTier,
+    [Parameter(Mandatory = $true)][ValidateRange(1, 20)][int]$Repetitions
 )
 
 $ErrorActionPreference = "Stop"
+if ($EvidenceTier -eq "hosted-smoke" -and $Repetitions -gt 5) {
+    throw "SSH smoke permits only 1-5 repetitions"
+}
+if ($EvidenceTier -eq "native-gate" -and $Repetitions -ne 20) {
+    throw "The supervisor native gate requires exactly 20 repetitions"
+}
 $experimentExitCode = 1
 $startedAt = [DateTimeOffset]::UtcNow
 $evidencePath = Join-Path $RunDirectory "supervisor-evidence.json"
@@ -37,7 +44,7 @@ try {
     $PSNativeCommandUseErrorActionPreference = $false
     $launcher = "import runpy,sys;sys.path[:0]=[sys.argv.pop(1),sys.argv.pop(1)];runpy.run_module('experiments.windows_supervisor_native.probe',run_name='__main__')"
     & $PythonPath -c $launcher (Join-Path $PackageRoot "src") $PackageRoot `
-        --evidence-tier hosted-smoke `
+        --evidence-tier $EvidenceTier `
         --repetitions $Repetitions `
         --pwsh $PowerShellPath `
         --source-commit $SourceCommit `
@@ -56,7 +63,7 @@ finally {
     run_id = Split-Path $RunDirectory -Leaf
     target_name = $TargetName
     launch_channel = "ssh"
-    evidence_tier = "hosted-smoke"
+    evidence_tier = $EvidenceTier
     source_commit = $SourceCommit
     package_sha256 = $PackageSha256
     repetitions = $Repetitions

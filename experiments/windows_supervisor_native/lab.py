@@ -191,10 +191,21 @@ class WindowsSupervisorLab:
             raise LabError("remote supervisor package identity mismatch")
         return package
 
-    def run_ssh_smoke(self, package: PackageInfo, *, repetitions: int) -> SupervisorRunInfo:
-        if not 1 <= repetitions <= 5:
+    def run_remote(
+        self,
+        package: PackageInfo,
+        *,
+        evidence_tier: str,
+        repetitions: int,
+    ) -> SupervisorRunInfo:
+        if evidence_tier == "hosted-smoke" and not 1 <= repetitions <= 5:
             raise LabError("supervisor SSH smoke repetitions must be between 1 and 5")
-        run_id = new_run_id().replace("run-", "supervisor-")
+        if evidence_tier == "native-gate" and repetitions != 20:
+            raise LabError("the supervisor native gate requires exactly 20 repetitions")
+        if evidence_tier not in {"hosted-smoke", "native-gate"}:
+            raise LabError("unknown supervisor evidence tier")
+        prefix = "supervisor-gate-" if evidence_tier == "native-gate" else "supervisor-"
+        run_id = new_run_id().replace("run-", prefix)
         package_root = self.config.remote_root / "packages" / package.sha256
         run_root = self.config.remote_root / "runs" / run_id
         pwsh = self.config.remote_root / "tools/powershell-7.6.3/pwsh.exe"
@@ -210,17 +221,18 @@ class WindowsSupervisorLab:
             f"-PythonPath {_ps_literal(str(python))} "
             f"-SourceCommit {_ps_literal(source_commit)} "
             f"-PackageSha256 {_ps_literal(package.sha256)} "
-            f"-TargetName {_ps_literal(self.config.name)} -Repetitions {repetitions}"
+            f"-TargetName {_ps_literal(self.config.name)} "
+            f"-EvidenceTier {_ps_literal(evidence_tier)} -Repetitions {repetitions}"
         )
         result = self.transport.run_powershell(command, timeout_seconds=5_400)
         if result.exit_code != 0:
-            raise LabError(f"supervisor SSH smoke infrastructure failed: {result.exit_code}")
+            raise LabError(f"supervisor remote run infrastructure failed: {result.exit_code}")
         payload = parse_marked_json(result.output)
         if payload.get("run_id") != run_id or payload.get("launch_channel") != "ssh":
-            raise LabError("supervisor SSH smoke returned inconsistent metadata")
+            raise LabError("supervisor remote run returned inconsistent metadata")
         digest = str(payload.get("result_sha256", ""))
         if len(digest) != _SHA256_LENGTH:
-            raise LabError("supervisor SSH smoke returned an invalid result checksum")
+            raise LabError("supervisor remote run returned an invalid result checksum")
         return SupervisorRunInfo(
             run_id=run_id,
             repetitions=repetitions,
@@ -259,14 +271,14 @@ def verify_supervisor_result(path: Path) -> SupervisorVerification:
         evidence = _read_object(root / "supervisor-evidence.json")
         if metadata.get("schema") != RESULT_SCHEMA:
             raise LabError("unexpected supervisor result schema")
-        if (
-            metadata.get("launch_channel") != "ssh"
-            or metadata.get("evidence_tier") != "hosted-smoke"
-        ):
-            raise LabError("remote supervisor evidence must remain an SSH hosted-smoke")
+        if metadata.get("launch_channel") != "ssh":
+            raise LabError("supervisor result did not originate from the SSH controller")
+        tier = metadata.get("evidence_tier")
+        if tier not in {"hosted-smoke", "native-gate"}:
+            raise LabError("remote supervisor evidence has an unknown tier")
         if metadata.get("evidence_complete") is not True:
             raise LabError("remote supervisor evidence is incomplete")
-        if evidence.get("schema") != SCHEMA or evidence.get("evidence_tier") != "hosted-smoke":
+        if evidence.get("schema") != SCHEMA or evidence.get("evidence_tier") != tier:
             raise LabError("supervisor evidence identity mismatch")
         source_commit = str(metadata.get("source_commit", ""))
         environment = evidence.get("environment")
@@ -352,6 +364,11 @@ def _parser() -> argparse.ArgumentParser:
     connection.add_argument("--remote-root")
     parser.add_argument("--source-ref", default="HEAD")
     parser.add_argument("--repetitions", type=int, choices=range(1, 6), default=3)
+    parser.add_argument(
+        "--native-gate",
+        action="store_true",
+        help="run the fixed 20-repetition decision gate through SSH",
+    )
     parser.add_argument("--skip-bootstrap", action="store_true")
     return parser
 
@@ -371,7 +388,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         phase0.bootstrap()
     lab = WindowsSupervisorLab(repository=root, config=config, transport=transport)
     package = lab.deploy(args.source_ref)
-    run = lab.run_ssh_smoke(package, repetitions=args.repetitions)
+    evidence_tier = "native-gate" if args.native_gate else "hosted-smoke"
+    repetitions = 20 if args.native_gate else args.repetitions
+    run = lab.run_remote(
+        package,
+        evidence_tier=evidence_tier,
+        repetitions=repetitions,
+    )
     archive = lab.collect(run)
     report = verify_supervisor_result(archive)
     print(json.dumps({"archive": str(archive), **asdict(report)}, default=str, indent=2))

@@ -113,6 +113,21 @@ deployment, SSH execution, collection, and local evidence recomputation. Use
 The 1–5 repetition SSH result may prove that the candidate works on that host,
 but it remains `decision=inconclusive` by contract.
 
+After a smoke passes, the Mac can run #15's fixed formal gate without an
+engineer operating the Windows desktop:
+
+```shell
+uv run --group windows-lab python scripts/windows_supervisor_lab.py \
+  --env-file .env --source-ref feature/issue-15-windows-native-gate \
+  --skip-bootstrap --native-gate
+```
+
+`--native-gate` ignores the smoke repetition option and always runs exactly 20
+fresh sessions. This is valid native evidence: the probe creates and inspects
+real Job Objects, processes, named events, and ConPTY instances on the target;
+SSH is only the outer control channel. The local verifier still recomputes the
+full evidence matrix before accepting `decision_ready=true`.
+
 Each repetition independently checks:
 
 - the trusted bootstrap and real PowerShell are members of the pre-created Job;
@@ -125,7 +140,8 @@ Each repetition independently checks:
 The extracted package also contains
 `experiments/windows_supervisor_native/RUN_WINDOWS11_SUPERVISOR.ps1`. The formal
 native gate is hard-coded to exactly 20 repetitions and is the only path that
-can produce `decision_ready=true`. An engineer is needed only if the target's
-policy blocks SSH/user-scoped execution or if the final interactive desktop
-impact check is required; ordinary installation, smoke execution, collection,
-and verification stay Mac-controlled.
+can produce `decision_ready=true`; the Mac `--native-gate` path enforces the
+same contract. An engineer is needed only if the target's policy blocks
+SSH/user-scoped execution or for #12's separate interactive-desktop impact
+check. #15 installation, formal execution, collection, and verification stay
+Mac-controlled.
