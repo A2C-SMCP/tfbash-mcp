@@ -171,6 +171,47 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             assert cast(str, execution["output"]).strip() == "mcp-windows-e2e"
             assert execution["exit_code"] == 37
 
+            running = await session.call_tool(
+                "shell_exec",
+                {
+                    "shell_id": shell_id,
+                    "command": "Start-Sleep -Seconds 30",
+                    "yield_ms": 0,
+                    "timeout_ms": 30_000,
+                },
+            )
+            running_content = cast(dict[str, Any], running.structuredContent)
+            assert running_content["status"] == "running"
+            exec_id = cast(str, running_content["exec_id"])
+            killed = await session.call_tool(
+                "shell_signal",
+                {"shell_id": shell_id, "exec_id": exec_id, "signal": "kill"},
+            )
+            killed_content = cast(dict[str, Any], killed.structuredContent)
+            assert killed_content["status"] == "delivered"
+
+            for _ in range(100):
+                listed = await session.call_tool("shell_list", {})
+                listed_content = cast(dict[str, Any], listed.structuredContent)
+                shells = cast(list[dict[str, Any]], listed_content["shells"])
+                if shells[0]["status"] == "ready" and shells[0]["active_exec_id"] is None:
+                    break
+                await anyio.sleep(0.05)
+            else:
+                raise AssertionError("Windows Shell did not rebuild after a forced Job kill")
+
+            recovered = await session.call_tool(
+                "shell_exec",
+                {
+                    "shell_id": shell_id,
+                    "command": "Write-Output mcp-windows-rebuilt",
+                    "yield_ms": 5_000,
+                },
+            )
+            recovered_content = cast(dict[str, Any], recovered.structuredContent)
+            assert recovered_content["status"] == "exited"
+            assert cast(str, recovered_content["output"]).strip() == "mcp-windows-rebuilt"
+
             closed = await session.call_tool("shell_close", {"shell_id": shell_id})
             closed_content = cast(dict[str, Any], closed.structuredContent)
             assert closed_content["cleanup_complete"] is True
