@@ -170,7 +170,13 @@ def validate_environment(windows: dict[str, object], tier: EnvironmentTier) -> N
             f"OS={os_architecture}, process={process_architecture}"
         )
     if tier is EnvironmentTier.NATIVE_GATE:
-        product_type = int(windows["ProductType"])
+        raw_product_type = windows["ProductType"]
+        if isinstance(raw_product_type, bool) or not isinstance(raw_product_type, int | str):
+            raise RuntimeError(f"unrecognized Windows ProductType: {raw_product_type!r}")
+        try:
+            product_type = int(raw_product_type)
+        except ValueError as exc:
+            raise RuntimeError(f"unrecognized Windows ProductType: {raw_product_type!r}") from exc
         parts = str(windows["Version"]).split(".")
         try:
             build = int(parts[2])

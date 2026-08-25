@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from tfbash_mcp.runtime.errors import (
     TransportError,
 )
 from tfbash_mcp.runtime.profile import ManagedRuntimeSession, RuntimeProfile
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +139,10 @@ _STOP = _Stop()
 
 
 class _DeadlineExpired(Exception):
+    pass
+
+
+class _ShellRebuildRequired(Exception):
     pass
 
 
@@ -372,6 +379,9 @@ class ShellWorker:
         except _DeadlineExpired:
             self._recover_timeout(work.execution, frame.correlation_id)
             return
+        except _ShellRebuildRequired:
+            self._recover_forced_kill(work.execution)
+            return
         while True:
             if self._clock.monotonic_ms() >= work.deadline_ms:
                 self._recover_timeout(work.execution, frame.correlation_id)
@@ -384,6 +394,9 @@ class ShellWorker:
             except _DeadlineExpired:
                 self._recover_timeout(work.execution, frame.correlation_id)
                 return
+            except _ShellRebuildRequired:
+                self._recover_forced_kill(work.execution)
+                return
             events, eof, _ = self._read_events(work.deadline_ms)
             if self._clock.monotonic_ms() >= work.deadline_ms:
                 self._recover_timeout(work.execution, frame.correlation_id)
@@ -395,6 +408,9 @@ class ShellWorker:
                 )
             except _DeadlineExpired:
                 self._recover_timeout(work.execution, frame.correlation_id)
+                return
+            except _ShellRebuildRequired:
+                self._recover_forced_kill(work.execution)
                 return
             for event in events:
                 if event.kind is DialectEventKind.OUTPUT:
@@ -451,6 +467,7 @@ class ShellWorker:
                 action.in_progress = True
             fatal_error: Exception | None = None
             execution_expired = False
+            rebuild_required = False
             action_complete = True
             try:
                 if action.execution is not execution:
@@ -467,6 +484,7 @@ class ShellWorker:
                     if not delivery.delivered:
                         raise ProcessControlError("semantic control was not delivered")
                     action.delivered = True
+                    rebuild_required = action.intent is ControlIntent.KILL
                     execution_expired = self._clock.monotonic_ms() >= execution_deadline_ms
             except Exception as error:
                 action.error = error
@@ -484,6 +502,8 @@ class ShellWorker:
                 return
             if fatal_error is not None:
                 raise fatal_error
+            if rebuild_required:
+                raise _ShellRebuildRequired
             if execution_expired:
                 raise _DeadlineExpired
 
@@ -661,6 +681,7 @@ class ShellWorker:
                 self._release_action(action, complete=True)
                 action.completed.set()
                 continue
+            rebuild_required = False
             try:
                 if action.execution is not execution:
                     raise ExecutionNotActive("worker action targeted a different execution")
@@ -673,11 +694,19 @@ class ShellWorker:
                 if not delivery.delivered:
                     raise ProcessControlError("semantic control was not delivered")
                 action.delivered = True
+                rebuild_required = action.intent is ControlIntent.KILL
             except Exception as error:
                 action.error = error
             finally:
                 self._release_action(action, complete=True)
                 action.completed.set()
+            if rebuild_required:
+                for write in staged_writes:
+                    self._reject_action(
+                        write,
+                        ExecutionNotActive(f"execution {execution.exec_id} is no longer active"),
+                    )
+                raise _ShellRebuildRequired
             if self._clock.monotonic_ms() >= execution_deadline_ms:
                 for write in staged_writes:
                     self._queue.put(write)
@@ -696,7 +725,7 @@ class ShellWorker:
                 deadline_ms=self._control_budget_ms,
             )
             if not delivery.delivered:
-                self._rebuild_after_timeout(execution)
+                self._rebuild_after_disruption(execution, ExecutionState.TIMEOUT)
                 return
             deadline_ms = self._clock.monotonic_ms() + self._config.recovery_deadline_ms
             self._write_all(
@@ -727,9 +756,23 @@ class ShellWorker:
             raise
         except Exception:
             pass
-        self._rebuild_after_timeout(execution)
+        self._rebuild_after_disruption(execution, ExecutionState.TIMEOUT)
 
-    def _rebuild_after_timeout(self, execution: Execution) -> None:
+    def _recover_forced_kill(self, execution: Execution) -> None:
+        if self._close_requested.is_set():
+            self._drain_to_close(execution)
+        if not execution.begin_finalizing():
+            return
+        self._reject_inactive_actions(execution)
+        self._rebuild_after_disruption(execution, ExecutionState.CANCELLED)
+
+    def _rebuild_after_disruption(
+        self,
+        execution: Execution,
+        terminal_state: ExecutionState,
+    ) -> None:
+        if terminal_state not in {ExecutionState.TIMEOUT, ExecutionState.CANCELLED}:
+            raise ValueError("rebuild requires timeout or cancelled terminal state")
         self._raise_if_stopping()
         self._shell.begin_rebuilding(execution.exec_id)
         deadline = time.monotonic() + self._config.rebuild_deadline_ms / 1000
@@ -783,6 +826,10 @@ class ShellWorker:
                     )
             raise
         except Exception:
+            _LOGGER.exception(
+                "Shell rebuild failed after %s",
+                terminal_state.value,
+            )
             if self._managed is not previous:
                 with suppress(RuntimeBoundaryError):
                     self._cleanup_managed(
@@ -791,22 +838,26 @@ class ShellWorker:
                     )
             if self._close_requested.is_set():
                 self._drain_to_close(execution)
-            self._finish_timeout_error(execution)
+            self._finish_rebuild_error(execution, terminal_state)
             return
         self._registry.finish_execution(
             self._shell.shell_id,
             execution.exec_id,
-            ExecutionState.TIMEOUT,
+            terminal_state,
             next_shell_state=ShellState.READY,
             cwd=cwd,
             shell_rebuilt=True,
         )
 
-    def _finish_timeout_error(self, execution: Execution) -> None:
+    def _finish_rebuild_error(
+        self,
+        execution: Execution,
+        terminal_state: ExecutionState,
+    ) -> None:
         self._registry.finish_execution(
             self._shell.shell_id,
             execution.exec_id,
-            ExecutionState.TIMEOUT,
+            terminal_state,
             next_shell_state=ShellState.ERROR,
         )
 

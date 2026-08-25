@@ -386,7 +386,9 @@ def _validate_terminal_result(
     allowed_statuses: dict[ExecutionState, frozenset[ShellState]] = {
         ExecutionState.EXITED: frozenset({ShellState.READY, ShellState.CLOSING}),
         ExecutionState.TIMEOUT: frozenset({ShellState.READY, ShellState.ERROR, ShellState.CLOSING}),
-        ExecutionState.CANCELLED: frozenset({ShellState.CLOSING}),
+        ExecutionState.CANCELLED: frozenset(
+            {ShellState.READY, ShellState.ERROR, ShellState.CLOSING}
+        ),
         ExecutionState.SHELL_ERROR: frozenset({ShellState.ERROR, ShellState.CLOSING}),
     }
     if state not in allowed_statuses:
@@ -398,5 +400,5 @@ def _validate_terminal_result(
             raise InvalidTransition("exited requires a normalized 32-bit exit code")
     elif exit_code is not None:
         raise InvalidTransition(f"{state.value} requires a null exit code")
-    if shell_rebuilt and state is not ExecutionState.TIMEOUT:
-        raise InvalidTransition("shell_rebuilt may be true only for timeout recovery")
+    if shell_rebuilt and state not in {ExecutionState.TIMEOUT, ExecutionState.CANCELLED}:
+        raise InvalidTransition("shell_rebuilt requires timeout or forced-kill recovery")

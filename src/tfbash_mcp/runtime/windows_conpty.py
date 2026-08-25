@@ -38,6 +38,8 @@ _CURSOR_POSITION_QUERY = "\x1b[6n"
 _TERMINAL_STATUS_RESPONSE = "\x1b[0n"
 _CURSOR_POSITION_RESPONSE = "\x1b[1;1R"
 _NATIVE_WRITE_CHUNK_BYTES = 4096
+_MAX_TERMINAL_METADATA_BYTES = 4096
+_TERMINAL_HOUSEKEEPING = ("\x1b[?7h", "\x1b[?7l")
 
 
 @runtime_checkable
@@ -158,6 +160,7 @@ class ConPtySession(RuntimeSession):
         self._priority_write_buffered_bytes = 0
         self._input_decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self._terminal_query_tail = ""
+        self._terminal_metadata_tail = ""
         self._reader_error: Exception | None = None
         self._writer_error: Exception | None = None
         self._reader_done = False
@@ -561,10 +564,13 @@ class ConPtyTransport:
             while True:
                 chunk = pty.read(blocking=True)
                 if chunk:
-                    encoded = chunk.encode("utf-8")
                     with session._condition:
                         if session._closing:
                             return
+                        visible, session._terminal_metadata_tail = _strip_terminal_metadata(
+                            session._terminal_metadata_tail + chunk
+                        )
+                        encoded = visible.encode("utf-8")
                         if (
                             len(session._read_buffer) + len(encoded)
                             > session._max_read_buffer_bytes
@@ -587,6 +593,16 @@ class ConPtyTransport:
                     session._condition.notify_all()
         finally:
             with session._condition:
+                visible, session._terminal_metadata_tail = _strip_terminal_metadata(
+                    session._terminal_metadata_tail,
+                    final=True,
+                )
+                encoded = visible.encode("utf-8")
+                if (
+                    not session._closing
+                    and len(session._read_buffer) + len(encoded) <= session._max_read_buffer_bytes
+                ):
+                    session._read_buffer.extend(encoded)
                 session._reader_done = True
                 session._condition.notify_all()
 
@@ -818,3 +834,45 @@ def _split_utf8_chunks(text: str) -> tuple[tuple[str, int], ...]:
     if buffered_bytes:
         chunks.append((text[start:], buffered_bytes))
     return tuple(chunks)
+
+
+def _strip_terminal_metadata(data: str, *, final: bool = False) -> tuple[str, str]:
+    """Remove non-output ConPTY metadata without consuming user-facing CSI styling."""
+
+    visible: list[str] = []
+    cursor = 0
+    while cursor < len(data):
+        escape_at = data.find("\x1b", cursor)
+        if escape_at < 0:
+            visible.append(data[cursor:])
+            return "".join(visible), ""
+        visible.append(data[cursor:escape_at])
+        suffix = data[escape_at:]
+        if suffix.startswith("\x1b]"):
+            bell_at = data.find("\x07", escape_at + 2)
+            string_end_at = data.find("\x1b\\", escape_at + 2)
+            endings = tuple(position for position in (bell_at, string_end_at) if position >= 0)
+            if endings:
+                end_at = min(endings)
+                cursor = end_at + (1 if end_at == bell_at else 2)
+                continue
+            if final:
+                return "".join(visible), ""
+            pending = suffix
+            if len(pending) > _MAX_TERMINAL_METADATA_BYTES:
+                pending = "\x1b]" + ("\x1b" if pending.endswith("\x1b") else "")
+            return "".join(visible), pending
+        housekeeping = next(
+            (sequence for sequence in _TERMINAL_HOUSEKEEPING if suffix.startswith(sequence)),
+            None,
+        )
+        if housekeeping is not None:
+            cursor = escape_at + len(housekeeping)
+            continue
+        if not final and any(sequence.startswith(suffix) for sequence in _TERMINAL_HOUSEKEEPING):
+            return "".join(visible), suffix
+        if not final and "\x1b]".startswith(suffix):
+            return "".join(visible), suffix
+        visible.append("\x1b")
+        cursor = escape_at + 1
+    return "".join(visible), ""

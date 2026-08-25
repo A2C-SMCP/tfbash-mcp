@@ -22,16 +22,20 @@ from tfbash_mcp.mcp_adapter import ShellToolService, ToolConcurrencyLimits
 from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_contract_schemas
 from tfbash_mcp.runtime import (
     BashDialect,
+    ConPtyTransport,
     EnvironmentKind,
     EnvironmentSummary,
     HostProfile,
     PexpectPosixPtyTransport,
     PosixBashProfile,
     PosixProcessSupervisor,
+    PowerShellDialect,
     RuntimeBuilders,
     RuntimeConfigurationError,
     RuntimeProfile,
     RuntimeSelection,
+    WindowsProcessSupervisor,
+    WindowsPwshProfile,
     compose_runtime,
     create_host_config,
 )
@@ -125,7 +129,13 @@ def build_service(
         host,
         RuntimeBuilders(
             posix_bash=lambda: _build_posix_runtime(shutdown_grace_ms=arguments.shutdown_grace_ms),
-            windows_pwsh=_blocked_windows_runtime,
+            windows_pwsh=lambda: _build_windows_runtime(
+                shutdown_grace_ms=arguments.shutdown_grace_ms,
+                close_timeout_ms=arguments.close_timeout_ms,
+                shell_startup_timeout_ms=arguments.shell_startup_timeout_ms,
+                max_read_buffer_bytes=arguments.output_buffer_bytes,
+                max_write_buffer_bytes=arguments.max_pending_write_bytes,
+            ),
         ),
     )
     executable = host.default_shell or composition.runtime.dialect.default_executable
@@ -285,9 +295,27 @@ def _build_posix_runtime(*, shutdown_grace_ms: int = 3000) -> RuntimeProfile:
     )
 
 
-def _blocked_windows_runtime() -> RuntimeProfile:
-    raise RuntimeConfigurationError(
-        "windows-pwsh is unavailable until #15 provides atomic spawn-to-Job ownership"
+def _build_windows_runtime(
+    *,
+    shutdown_grace_ms: int = 3000,
+    close_timeout_ms: int = 5000,
+    shell_startup_timeout_ms: int = 30_000,
+    max_read_buffer_bytes: int = 4 * 1024 * 1024,
+    max_write_buffer_bytes: int = 256 * 1024,
+) -> RuntimeProfile:
+    return WindowsPwshProfile(
+        dialect=PowerShellDialect(),
+        transport=ConPtyTransport(
+            max_read_buffer_bytes=max_read_buffer_bytes,
+            max_write_buffer_bytes=max_write_buffer_bytes,
+            close_timeout_ms=close_timeout_ms,
+        ),
+        supervisor=WindowsProcessSupervisor(
+            terminate_grace_ms=shutdown_grace_ms,
+            attach_cleanup_timeout_ms=close_timeout_ms,
+            gate_wait_timeout_ms=shell_startup_timeout_ms,
+            shell_ready_timeout_ms=shell_startup_timeout_ms,
+        ),
     )
 
 

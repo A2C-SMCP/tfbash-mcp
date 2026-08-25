@@ -21,6 +21,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
+windows-lab = [
+    "pexpect>=4.9.0,<5.0.0",
+]
 dev = [
     "mypy>=1.17.1,<1.18.0",
     "pytest>=8.4.1,<9.0.0",
@@ -31,6 +34,7 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.coverage.run]

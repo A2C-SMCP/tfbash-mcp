@@ -121,8 +121,6 @@ class ShellRegistry:
         cwd: str | None = None,
         shell_rebuilt: bool = False,
     ) -> bool:
-        if state is ExecutionState.CANCELLED:
-            raise InvalidTransition("cancelled must use cancel_active_for_close")
         with self._lock:
             shell = self.get_shell(shell_id)
             execution = shell.active_execution

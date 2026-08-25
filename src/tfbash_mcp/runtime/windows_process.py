@@ -110,6 +110,7 @@ _GATE_TIMEOUT_ENV = "TFBASH_MCP_GATE_TIMEOUT_MS"
 _GATE_ENV_KEYS = frozenset(
     key.casefold() for key in (_GATE_NAME_ENV, _GATE_PAYLOAD_ENV, _GATE_TIMEOUT_ENV)
 )
+_INFRASTRUCTURE_STABLE_SECONDS = 0.1
 
 
 class _CleanupDeadlineExpired(Exception):
@@ -150,10 +151,12 @@ class WindowsProcessOwnership:
         self._attachment_pending = False
         self._root: WindowsProcessHandle | None = None
         self._bootstrap: WindowsProcessHandle | None = None
+        self._infrastructure: dict[WindowsProcessIdentity, WindowsProcessHandle] = {}
         self._pending_close: dict[WindowsProcessIdentity, WindowsProcessHandle] = {}
         self._attachment_indeterminate = False
         self._attached = False
         self._interrupt_sender: InterruptSender | None = None
+        self._job_termination_requested = False
         self._finalized = False
 
     @property
@@ -278,6 +281,12 @@ class WindowsProcessOwnership:
                     deadline=deadline,
                     cancel_signal=cancel_signal,
                 )
+                self._capture_infrastructure(
+                    root,
+                    shell,
+                    deadline=deadline,
+                    cancel_signal=cancel_signal,
+                )
             except Exception as error:
                 self._terminate_failed_attachment(root)
                 raise ProcessControlError(
@@ -287,6 +296,66 @@ class WindowsProcessOwnership:
             self._root = shell
             self._attached = True
             return True
+
+    def _capture_infrastructure(
+        self,
+        bootstrap: WindowsProcessHandle,
+        shell: WindowsProcessHandle,
+        *,
+        deadline: float | None,
+        cancel_signal: CancellationSignal | None,
+    ) -> None:
+        """Retain exact handles for trusted ConPTY support processes.
+
+        This runs after the trusted bootstrap has authenticated the PowerShell
+        child and before any startup/user input is written.  Job members present
+        at this point are runtime infrastructure, such as the ConPTY console
+        host, and must survive per-execution descendant cleanup.
+        """
+
+        job = self._require_job()
+        trusted = {bootstrap.identity, shell.identity}
+        capture_deadline = time.monotonic() + self._shell_ready_timeout_ms / 1000
+        if deadline is not None:
+            capture_deadline = min(capture_deadline, deadline)
+        stable_seconds = min(
+            _INFRASTRUCTURE_STABLE_SECONDS,
+            self._shell_ready_timeout_ms / 2000,
+        )
+        last_process_ids: tuple[int, ...] | None = None
+        stable_since = time.monotonic()
+        while True:
+            if not self._release_allowed(deadline, cancel_signal):
+                raise ProcessControlError("Windows infrastructure capture was cancelled or expired")
+            now = time.monotonic()
+            if now >= capture_deadline:
+                raise ProcessControlError("Windows infrastructure capture expired")
+            process_ids = tuple(sorted(self._api.job_process_ids(job, deadline=capture_deadline)))
+            if process_ids != last_process_ids:
+                last_process_ids = process_ids
+                stable_since = now
+            for process_id in process_ids:
+                if process_id in {
+                    bootstrap.identity.process_id,
+                    shell.identity.process_id,
+                }:
+                    continue
+                process = self._api.open_process_if_alive(process_id)
+                if process is None:
+                    continue
+                if process.identity in trusted or process.identity in self._infrastructure:
+                    self._api.close_process(process)
+                    continue
+                if not self._api.process_is_in_job(job, process):
+                    self._api.close_process(process)
+                    raise ProcessControlError(
+                        "Windows infrastructure process escaped its Job Object"
+                    )
+                self._infrastructure[process.identity] = process
+            now = time.monotonic()
+            if now - stable_since >= stable_seconds:
+                return
+            time.sleep(min(0.005, capture_deadline - now))
 
     def _await_shell(
         self,
@@ -353,6 +422,7 @@ class WindowsProcessOwnership:
             job = self._job
             if job is not None and self._api.process_is_in_job(job, root):
                 self._api.terminate_job(job, 1)
+                self._job_termination_requested = True
             if self._api.process_is_alive(root):
                 self._api.terminate_process(root, 1)
                 self._api.wait_processes((root,), self._attach_cleanup_timeout_ms)
@@ -491,7 +561,7 @@ class WindowsProcessSupervisor:
                     if concrete._api.process_is_alive(root)
                     else False
                 )
-                descendants = self._job_members(concrete, root, deadline=deadline)
+                descendants = self._job_members(concrete, deadline=deadline)
                 try:
                     if descendants and self._terminate_grace_ms:
                         remaining_ms = self._remaining_control_ms(deadline)
@@ -520,6 +590,7 @@ class WindowsProcessSupervisor:
                 return ControlDelivery(delivered=False)
             self._check_control_deadline(deadline)
             concrete._api.terminate_job(concrete._require_job(), 1)
+            concrete._job_termination_requested = True
             return ControlDelivery(delivered=True)
 
     def is_alive(self, ownership: ProcessOwnership) -> bool:
@@ -557,10 +628,10 @@ class WindowsProcessSupervisor:
             ):
                 if concrete._finalized:
                     raise ProcessControlError("cannot clean an execution after Shell cleanup")
-                root = self._require_attached(concrete)
+                self._require_attached(concrete)
                 self._retry_pending_closes(concrete)
                 while True:
-                    descendants = self._job_members(concrete, root, deadline=deadline)
+                    descendants = self._job_members(concrete, deadline=deadline)
                     try:
                         live: list[WindowsProcessHandle] = []
                         for process in descendants:
@@ -571,7 +642,6 @@ class WindowsProcessSupervisor:
                         if not live:
                             remaining = self._remaining_descendants(
                                 concrete,
-                                root,
                                 deadline=deadline,
                             )
                             return CleanupResult(
@@ -623,10 +693,14 @@ class WindowsProcessSupervisor:
                     self._finalize(concrete)
                     return CleanupResult(reaped=True, remaining_managed_processes=0)
                 self._retry_pending_closes(concrete)
-                if self._job_process_ids(concrete, deadline=deadline):
+                job_has_processes = bool(self._job_process_ids(concrete, deadline=deadline))
+                if job_has_processes:
                     concrete._api.terminate_job(job, 1)
+                    concrete._job_termination_requested = True
                     self._check_deadline(deadline)
-                if concrete._api.process_is_alive(root):
+                elif not concrete._job_termination_requested and concrete._api.process_is_alive(
+                    root
+                ):
                     concrete._api.terminate_process(root, 1)
                     self._check_deadline(deadline)
                 while True:
@@ -677,7 +751,6 @@ class WindowsProcessSupervisor:
     @staticmethod
     def _job_members(
         ownership: WindowsProcessOwnership,
-        root: WindowsProcessHandle,
         *,
         deadline: float | None = None,
     ) -> tuple[WindowsProcessHandle, ...]:
@@ -689,12 +762,8 @@ class WindowsProcessSupervisor:
                 deadline=deadline,
             ):
                 WindowsProcessSupervisor._check_deadline(deadline)
-                if process_id == root.identity.process_id:
-                    continue
-                if (
-                    ownership._bootstrap is not None
-                    and process_id == ownership._bootstrap.identity.process_id
-                ):
+                retained = WindowsProcessSupervisor._persistent_by_pid(ownership).get(process_id)
+                if retained is not None and ownership._api.process_is_alive(retained):
                     continue
                 process = ownership._api.open_process_if_alive(process_id)
                 if process is None:
@@ -702,7 +771,9 @@ class WindowsProcessSupervisor:
                     continue
                 ownership._pending_close[process.identity] = process
                 WindowsProcessSupervisor._check_deadline(deadline)
-                if ownership._api.process_is_in_job(job, process):
+                if process.identity in WindowsProcessSupervisor._persistent_identities(ownership):
+                    WindowsProcessSupervisor._close_processes(ownership, (process,))
+                elif ownership._api.process_is_in_job(job, process):
                     members.append(process)
                 else:
                     WindowsProcessSupervisor._close_processes(ownership, (process,))
@@ -732,19 +803,43 @@ class WindowsProcessSupervisor:
     @staticmethod
     def _remaining_descendants(
         ownership: WindowsProcessOwnership,
-        root: WindowsProcessHandle,
         *,
         deadline: float | None = None,
     ) -> int:
-        process_ids = WindowsProcessSupervisor._job_process_ids(
+        descendants = WindowsProcessSupervisor._job_members(
             ownership,
             deadline=deadline,
         )
-        WindowsProcessSupervisor._check_deadline(deadline)
-        exempt = {root.identity.process_id}
-        if ownership._bootstrap is not None:
-            exempt.add(ownership._bootstrap.identity.process_id)
-        return sum(process_id not in exempt for process_id in process_ids)
+        try:
+            return len(descendants)
+        finally:
+            WindowsProcessSupervisor._close_processes(ownership, descendants)
+
+    @staticmethod
+    def _persistent_by_pid(
+        ownership: WindowsProcessOwnership,
+    ) -> dict[int, WindowsProcessHandle]:
+        return {
+            process.identity.process_id: process
+            for process in WindowsProcessSupervisor._persistent_handles(ownership)
+        }
+
+    @staticmethod
+    def _persistent_identities(
+        ownership: WindowsProcessOwnership,
+    ) -> frozenset[WindowsProcessIdentity]:
+        return frozenset(
+            process.identity for process in WindowsProcessSupervisor._persistent_handles(ownership)
+        )
+
+    @staticmethod
+    def _persistent_handles(
+        ownership: WindowsProcessOwnership,
+    ) -> tuple[WindowsProcessHandle, ...]:
+        roots = tuple(
+            process for process in (ownership._root, ownership._bootstrap) if process is not None
+        )
+        return (*roots, *ownership._infrastructure.values())
 
     @staticmethod
     def _job_process_ids(
@@ -795,20 +890,38 @@ class WindowsProcessSupervisor:
         first_error: Exception | None = None
         try:
             WindowsProcessSupervisor._retry_pending_closes(ownership)
-            if ownership._root is not None:
-                ownership._api.close_process(ownership._root)
-                ownership._root = None
-            if ownership._bootstrap is not None:
-                ownership._api.close_process(ownership._bootstrap)
-                ownership._bootstrap = None
-            if ownership._gate is not None:
-                ownership._api.close_gate_event(ownership._gate)
-                ownership._gate = None
-            if ownership._job is not None:
-                ownership._api.close_job(ownership._job)
-                ownership._job = None
         except Exception as error:
             first_error = error
+        for identity, process in tuple(ownership._infrastructure.items()):
+            try:
+                ownership._api.close_process(process)
+                ownership._infrastructure.pop(identity, None)
+            except Exception as error:
+                first_error = first_error or error
+        if ownership._root is not None:
+            try:
+                ownership._api.close_process(ownership._root)
+                ownership._root = None
+            except Exception as error:
+                first_error = first_error or error
+        if ownership._bootstrap is not None:
+            try:
+                ownership._api.close_process(ownership._bootstrap)
+                ownership._bootstrap = None
+            except Exception as error:
+                first_error = first_error or error
+        if ownership._gate is not None:
+            try:
+                ownership._api.close_gate_event(ownership._gate)
+                ownership._gate = None
+            except Exception as error:
+                first_error = first_error or error
+        if ownership._job is not None:
+            try:
+                ownership._api.close_job(ownership._job)
+                ownership._job = None
+            except Exception as error:
+                first_error = first_error or error
         if first_error is not None:
             raise ProcessControlError("failed to close Windows ownership handles") from first_error
         ownership._interrupt_sender = None

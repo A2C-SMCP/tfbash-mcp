@@ -440,7 +440,8 @@ class CtypesWindowsProcessApi:
 
     @staticmethod
     def _missing_process(error: OSError) -> bool:
-        return getattr(error, "winerror", error.errno) == _ERROR_INVALID_PARAMETER
+        code = getattr(error, "winerror", None)
+        return (error.errno if code is None else code) == _ERROR_INVALID_PARAMETER
 
     @staticmethod
     def _raise_last_error(message: str) -> None:

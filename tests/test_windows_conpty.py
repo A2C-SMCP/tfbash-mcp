@@ -599,6 +599,18 @@ def test_terminal_queries_split_across_reads_use_the_single_writer() -> None:
     transport.close(session)
 
 
+def test_terminal_metadata_is_redacted_across_native_read_chunks() -> None:
+    transport, session, fake, _ = _spawn()
+    fake.emit("visible\x1b[?7")
+    fake.emit("l\x1b]0;Administrator: C:\\secret\\python.exe\x1b")
+    fake.emit("\\tail\x1b[?7h\x1b[31mred\x1b[0m")
+
+    _wait_until(lambda: bytes(session._read_buffer) == b"visibletail\x1b[31mred\x1b[0m")
+    fake.finish()
+    assert _drain(transport, session) == b"visibletail\x1b[31mred\x1b[0m"
+    transport.close(session)
+
+
 def test_terminal_query_responses_preserve_request_order() -> None:
     transport, session, fake, _ = _spawn()
     fake.emit("\x1b[6n\x1b[5n")

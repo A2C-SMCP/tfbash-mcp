@@ -1670,6 +1670,89 @@ def test_failed_rebuild_seals_timeout_as_error_without_false_rebuilt_flag() -> N
         manager.shutdown()
 
 
+def test_forced_kill_observably_rebuilds_shell() -> None:
+    profile = _fake_profile(RuntimeName.WINDOWS_PWSH)
+    transport = profile.transport
+    supervisor = profile.supervisor
+    assert isinstance(transport, _Transport)
+    assert isinstance(supervisor, _Supervisor)
+    manager = CommandShellManager(
+        profile=profile,
+        config=ManagerConfig(worker=WorkerConfig(rebuild_deadline_ms=1000)),
+    )
+    try:
+        shell = manager.open_shell(_request(profile.dialect.default_executable))
+        running = manager.exec(
+            shell.shell_id,
+            "hang",
+            yield_ms=0,
+            timeout_ms=60_000,
+            max_output_bytes=4096,
+        )
+        assert transport.command_started.wait(1)
+
+        assert manager.signal(shell.shell_id, running.exec_id, ControlIntent.KILL)
+        killed = manager.read(
+            shell.shell_id,
+            running.exec_id,
+            cursor=0,
+            max_bytes=4096,
+            wait_ms=1000,
+        )
+
+        assert killed.status is ExecutionState.CANCELLED
+        assert killed.shell_status is ShellState.READY
+        assert killed.shell_rebuilt is True
+        assert supervisor.sequence == 2
+        assert supervisor.cleanup_calls == 1
+        assert len(transport.sessions) == 2
+        assert (
+            manager.exec(
+                shell.shell_id,
+                "short",
+                yield_ms=1000,
+                timeout_ms=1000,
+                max_output_bytes=4096,
+            ).status
+            is ExecutionState.EXITED
+        )
+    finally:
+        manager.shutdown()
+
+
+def test_failed_forced_kill_rebuild_seals_cancelled_as_error() -> None:
+    profile = _fake_profile(RuntimeName.WINDOWS_PWSH)
+    transport = profile.transport
+    assert isinstance(transport, _Transport)
+    transport.fail_spawn_after = 1
+    manager = CommandShellManager(profile=profile)
+    try:
+        shell = manager.open_shell(_request(profile.dialect.default_executable))
+        running = manager.exec(
+            shell.shell_id,
+            "hang",
+            yield_ms=0,
+            timeout_ms=60_000,
+            max_output_bytes=4096,
+        )
+        assert transport.command_started.wait(1)
+
+        assert manager.signal(shell.shell_id, running.exec_id, ControlIntent.KILL)
+        killed = manager.read(
+            shell.shell_id,
+            running.exec_id,
+            cursor=0,
+            max_bytes=4096,
+            wait_ms=1000,
+        )
+
+        assert killed.status is ExecutionState.CANCELLED
+        assert killed.shell_status is ShellState.ERROR
+        assert killed.shell_rebuilt is False
+    finally:
+        manager.shutdown()
+
+
 def test_close_during_bounded_rebuild_spawn_retains_and_cleans_new_owner() -> None:
     profile = _fake_profile(RuntimeName.POSIX_BASH)
     transport = profile.transport
