@@ -403,7 +403,7 @@ Snapshot 中所有共同字段都必须出现，终态附加字段只在终态�
 | `running` | `null` | 不出现 | 命令尚未到达终态 |
 | `exited` | 平台规范化 integer | 必须出现；通常 `shell_status=ready` | 方言 prompt 与退出码定界符完整；包括控制投递后 Shell 最终返回的状态码 |
 | `timeout` | `null` | 必须出现；`shell_status=ready/error` | `timeout_ms` 到期，由 Server 发起恢复或重建 |
-| `cancelled` | `null` | 必须出现；`shell_status=closing` | close/shutdown 的取消 CAS 胜出 |
+| `cancelled` | `null` | 必须出现；`shell_status=ready/error/closing` | close/shutdown 的取消 CAS 胜出，或强制终止后 Shell 重建成功/失败 |
 | `shell_error` | `null` | 必须出现；通常 `shell_status=error` | 无法取得可信 `$?` 或 Shell/worker 故障 |
 
 若 close admission fence 先发生、自然终态 CAS 后发生但先于 close cancellation CAS，则保留自然终态，同时该 snapshot 的 `shell_status=closing`；因此 `exited`、`timeout` 或 `shell_error` 也可能与 `closing` 组合。`shell_rebuilt` 始终是 boolean。`eof` 不由 `status` 单独决定，而只表示终态输出是否已经读到当前末尾。

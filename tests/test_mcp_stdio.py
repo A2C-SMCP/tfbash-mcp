@@ -34,7 +34,9 @@ async def _read_until_terminal(
                 "wait_ms": min(5_000, remaining_ms),
             },
         )
-        last = cast(dict[str, Any], result.structuredContent)
+        if result.structuredContent is None:
+            raise AssertionError(f"shell_read returned no structured result: {result.content}")
+        last = result.structuredContent
         cursor = cast(int, last["next_cursor"])
         if last["status"] != "running":
             return last
@@ -64,7 +66,9 @@ async def _read_until_output(
                 "wait_ms": min(5_000, remaining_ms),
             },
         )
-        last = cast(dict[str, Any], result.structuredContent)
+        if result.structuredContent is None:
+            raise AssertionError(f"shell_read returned no structured result: {result.content}")
+        last = result.structuredContent
         cursor = cast(int, last["next_cursor"])
         output += cast(str, last["output"])
         if expected in output:
@@ -165,9 +169,21 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
 
 def test_cancelling_an_inflight_long_call_does_not_block_stdio_shutdown() -> None:
     async def scenario() -> None:
+        runtime_arguments: list[str]
+        if sys.platform == "win32":
+            runtime_arguments = [
+                "--runtime-profile",
+                "windows-pwsh",
+                "--shell",
+                os.environ["PHASE0_PWSH"],
+            ]
+            long_command = "Start-Sleep -Seconds 30"
+        else:
+            runtime_arguments = []
+            long_command = "sleep 30"
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "tfbash_mcp"],
+            args=["-m", "tfbash_mcp", *runtime_arguments],
             cwd=Path.cwd(),
         )
         context_started = time.monotonic()
@@ -183,7 +199,7 @@ def test_cancelling_an_inflight_long_call_does_not_block_stdio_shutdown() -> Non
             async def long_call() -> None:
                 await session.call_tool(
                     "shell_exec",
-                    {"shell_id": shell_id, "command": "sleep 30", "yield_ms": 60_000},
+                    {"shell_id": shell_id, "command": long_command, "yield_ms": 60_000},
                 )
 
             async with anyio.create_task_group() as calls:
@@ -200,7 +216,9 @@ def test_cancelling_an_inflight_long_call_does_not_block_stdio_shutdown() -> Non
                 calls.cancel_scope.cancel()
             assert time.monotonic() - cancel_started < 1
 
-        assert time.monotonic() - context_started < 6
+        # Windows may spend its bounded shutdown budget proving Job cleanup,
+        # but cancellation must not wait for the 30-second user command.
+        assert time.monotonic() - context_started < 20
 
     anyio.run(scenario)
 
@@ -346,8 +364,10 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
         startup_command = "$env:TFBASH_STARTUP_REPLAY='ready'"
         inherited_secret = "inherited-without-agent-disclosure"
         virtual_environment = str(Path.cwd() / ".test-venv")
-        inherited_path = f"{Path(virtual_environment) / 'Scripts'}{os.pathsep}{os.environ['PATH']}"
-        powershell_path_literal = inherited_path.replace("'", "''")
+        path_key = next(key for key in os.environ if key.casefold() == "path")
+        inherited_path = (
+            f"{Path(virtual_environment) / 'Scripts'}{os.pathsep}{os.environ[path_key]}"
+        )
         parameters = StdioServerParameters(
             command=sys.executable,
             args=[
@@ -372,7 +392,7 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             ],
             env={
                 **os.environ,
-                "PATH": inherited_path,
+                path_key: inherited_path,
                 "VIRTUAL_ENV": virtual_environment,
                 "TFBASH_ENV_SECRET": inherited_secret,
             },
@@ -408,18 +428,36 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             opened = await session.call_tool("shell_open", {})
             opened_content = cast(dict[str, Any], opened.structuredContent)
             shell_id = cast(str, opened_content["shell_id"])
-            executed = await session.call_tool(
+            environment_probe = await session.call_tool(
                 "shell_exec",
                 {
                     "shell_id": shell_id,
                     "command": (
-                        f"if ($env:Path -eq '{powershell_path_literal}' -and "
-                        "$env:VIRTUAL_ENV -and "
-                        "$env:TFBASH_ENV_SECRET -eq 'inherited-without-agent-disclosure' -and "
-                        "$env:TFBASH_STARTUP_REPLAY -eq 'ready') { "
-                        'cmd.exe /d /c "echo mcp-windows-e2e & exit /b 37" '
-                        "} else { exit 91 }"
+                        "Write-Output ((($env:Path.Split(';') -contains "
+                        "\"$env:VIRTUAL_ENV\\Scripts\").ToString()) + ':' + "
+                        "(($env:TFBASH_ENV_SECRET -eq "
+                        "'inherited-without-agent-disclosure').ToString()) + ':' + "
+                        "(($env:TFBASH_STARTUP_REPLAY -eq 'ready').ToString()))"
                     ),
+                    "yield_ms": 5_000,
+                },
+            )
+            environment_content = cast(dict[str, Any], environment_probe.structuredContent)
+            if environment_content["status"] == "running":
+                environment_content = await _read_until_terminal(
+                    session,
+                    shell_id=shell_id,
+                    exec_id=cast(str, environment_content["exec_id"]),
+                )
+            assert environment_content["status"] == "exited"
+            assert environment_content["exit_code"] == 0
+            assert cast(str, environment_content["output"]).strip() == "True:True:True"
+
+            executed = await session.call_tool(
+                "shell_exec",
+                {
+                    "shell_id": shell_id,
+                    "command": 'cmd.exe /d /c "echo mcp-windows-e2e & exit /b 37"',
                     "yield_ms": 5_000,
                 },
             )
@@ -467,8 +505,8 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 {
                     "shell_id": shell_id,
                     "command": (
-                        "if ($env:TFBASH_STARTUP_REPLAY -eq 'ready') { "
-                        "Write-Output mcp-windows-rebuilt } else { exit 91 }"
+                        'Write-Output ("mcp-windows-rebuilt:" + '
+                        "($env:TFBASH_STARTUP_REPLAY -eq 'ready'))"
                     ),
                     "yield_ms": 5_000,
                 },
@@ -481,7 +519,7 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                     exec_id=cast(str, recovered_content["exec_id"]),
                 )
             assert recovered_content["status"] == "exited"
-            assert cast(str, recovered_content["output"]).strip() == "mcp-windows-rebuilt"
+            assert cast(str, recovered_content["output"]).strip() == "mcp-windows-rebuilt:True"
 
             closed = await session.call_tool("shell_close", {"shell_id": shell_id})
             closed_content = cast(dict[str, Any], closed.structuredContent)

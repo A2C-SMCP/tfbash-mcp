@@ -489,7 +489,7 @@ class TimeoutExecutionSnapshot(_TerminalExecutionSnapshot):
 class CancelledExecutionSnapshot(_TerminalExecutionSnapshot):
     status: Literal["cancelled"]
     exit_code: None
-    shell_status: Literal["closing"]
+    shell_status: Literal["ready", "error", "closing"]
 
 
 class ShellErrorExecutionSnapshot(_TerminalExecutionSnapshot):

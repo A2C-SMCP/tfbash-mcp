@@ -520,7 +520,7 @@ def test_runtime_defaults_limits_and_explicit_null_are_resolved() -> None:
         ("running", RunningExecutionSnapshot, None),
         ("exited", ExitedExecutionSnapshot, "ready"),
         ("timeout", TimeoutExecutionSnapshot, "error"),
-        ("cancelled", CancelledExecutionSnapshot, "closing"),
+        ("cancelled", CancelledExecutionSnapshot, "ready"),
         ("shell_error", ShellErrorExecutionSnapshot, "error"),
     ],
 )
@@ -554,7 +554,6 @@ def test_execution_snapshot_union_is_discriminated(
     [
         ("exited", "error"),
         ("timeout", "busy"),
-        ("cancelled", "ready"),
         ("shell_error", "ready"),
     ],
 )
