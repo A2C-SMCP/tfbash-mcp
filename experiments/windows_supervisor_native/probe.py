@@ -364,6 +364,7 @@ def _environment(pwsh: str, source_commit: str) -> dict[str, object]:
         text=True,
     ).strip()
     return {
+        "windows_native": True,
         "windows_client": product_type == "1",
         "windows_11": build >= 22000,
         "windows_build": build,

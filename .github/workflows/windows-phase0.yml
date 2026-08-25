@@ -9,16 +9,24 @@ on:
     paths:
       - ".github/workflows/windows-phase0.yml"
       - "experiments/windows_phase0/**"
+      - "experiments/windows_supervisor_native/**"
       - "scripts/windows_lab.py"
+      - "scripts/windows_supervisor_lab.py"
       - "tests/test_windows_lab.py"
+      - "tests/test_windows_supervisor_lab.py"
+      - "src/tfbash_mcp/runtime/**"
       - "pyproject.toml"
       - "uv.lock"
   pull_request:
     paths:
       - ".github/workflows/windows-phase0.yml"
       - "experiments/windows_phase0/**"
+      - "experiments/windows_supervisor_native/**"
       - "scripts/windows_lab.py"
+      - "scripts/windows_supervisor_lab.py"
       - "tests/test_windows_lab.py"
+      - "tests/test_windows_supervisor_lab.py"
+      - "src/tfbash_mcp/runtime/**"
       - "pyproject.toml"
       - "uv.lock"
   workflow_dispatch:
@@ -47,9 +55,9 @@ jobs:
 
       - name: Validate controller
         run: |
-          uv run --group windows-lab ruff check experiments/windows_phase0/lab.py scripts/windows_lab.py tests/test_windows_lab.py
-          uv run --group windows-lab mypy --strict experiments/windows_phase0/lab.py scripts/windows_lab.py tests/test_windows_lab.py
-          uv run --group windows-lab python -m pytest tests/test_windows_lab.py
+          uv run --group windows-lab ruff check experiments/windows_phase0/lab.py experiments/windows_supervisor_native scripts/windows_lab.py scripts/windows_supervisor_lab.py tests/test_windows_lab.py tests/test_windows_supervisor_lab.py
+          uv run --group windows-lab mypy
+          uv run --group windows-lab python -m pytest tests/test_windows_lab.py tests/test_windows_supervisor_lab.py
 
   hosted-smoke:
     name: Hosted Windows smoke
@@ -102,7 +110,42 @@ jobs:
               $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }
             }
           }
+          Get-ChildItem experiments/windows_supervisor_native/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }
+            }
+          }
           if ($failed) { throw "PowerShell parser rejected Windows Lab scripts" }
+
+      - name: Run supervisor native hosted smoke (1 repetition)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sourceCommit = (git rev-parse HEAD).Trim()
+          uv run --python 3.12.10 --with pywinpty==3.0.5 -- `
+            python -m experiments.windows_supervisor_native.probe `
+            --evidence-tier hosted-smoke `
+            --pwsh $env:PHASE0_PWSH `
+            --repetitions 1 `
+            --source-commit $sourceCommit `
+            --output artifacts/windows-supervisor-hosted/evidence.json
+          $experimentExitCode = $LASTEXITCODE
+          if ($experimentExitCode -notin @(0, 1)) {
+            throw "Supervisor smoke infrastructure failed with exit code $experimentExitCode"
+          }
+          if (-not (Test-Path artifacts/windows-supervisor-hosted/evidence.json -PathType Leaf)) {
+            throw "Supervisor smoke did not produce evidence"
+          }
+          Write-Host "Supervisor smoke experiment exit code: $experimentExitCode"
+          exit 0
 
       - name: Run hosted smoke matrix (1 repetition)
         shell: pwsh
@@ -133,5 +176,14 @@ jobs:
         with:
           name: windows-phase0-hosted-${{ github.run_attempt }}
           path: artifacts/windows-phase0-hosted
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload supervisor smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-supervisor-hosted-${{ github.run_attempt }}
+          path: artifacts/windows-supervisor-hosted
           if-no-files-found: warn
           retention-days: 30

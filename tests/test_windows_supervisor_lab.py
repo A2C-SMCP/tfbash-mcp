@@ -34,6 +34,7 @@ def _evidence(*, tier: str = "hosted-smoke", repetitions: int = 3) -> dict[str, 
         "evidence_tier": tier,
         "repetitions": repetitions,
         "environment": {
+            "windows_native": True,
             "windows_client": True,
             "windows_11": True,
             "os_x64": True,
@@ -58,6 +59,20 @@ def test_ssh_smoke_can_pass_contract_but_never_unlock_production() -> None:
     assert decision.contract_passed
     assert not decision.decision_ready
     assert decision.decision == "inconclusive"
+
+
+def test_hosted_smoke_accepts_windows_server_but_native_gate_does_not() -> None:
+    hosted = _evidence()
+    native = _evidence(tier="native-gate", repetitions=20)
+    for payload in (hosted, native):
+        environment = payload["environment"]
+        assert isinstance(environment, dict)
+        environment["windows_client"] = False
+        environment["windows_11"] = False
+
+    assert evaluate_evidence(hosted).contract_passed
+    with pytest.raises(EvidenceError, match="windows_client"):
+        evaluate_evidence(native)
 
 
 def test_native_gate_requires_exactly_twenty_complete_iterations() -> None:

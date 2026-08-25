@@ -51,8 +51,7 @@ def evaluate_evidence(payload: Mapping[str, object]) -> EvidenceDecision:
     if not isinstance(environment, Mapping):
         raise EvidenceError("environment evidence is missing")
     required_environment = {
-        "windows_client": True,
-        "windows_11": True,
+        "windows_native": True,
         "os_x64": True,
         "python_x64": True,
         "powershell_version": "7.6.3",
@@ -61,6 +60,10 @@ def evaluate_evidence(payload: Mapping[str, object]) -> EvidenceDecision:
     for key, expected in required_environment.items():
         if environment.get(key) != expected:
             raise EvidenceError(f"environment gate failed: {key}")
+    if tier == "native-gate":
+        for key in ("windows_client", "windows_11"):
+            if environment.get(key) is not True:
+                raise EvidenceError(f"environment gate failed: {key}")
     iterations = payload.get("iterations")
     if not isinstance(iterations, Sequence) or isinstance(iterations, str):
         raise EvidenceError("iteration evidence is missing")
