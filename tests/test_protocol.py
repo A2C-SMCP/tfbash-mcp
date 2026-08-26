@@ -95,6 +95,9 @@ def test_every_tool_has_strict_input_and_output_schema(platform: PlatformName) -
 
     assert set(contracts) == {tool.value for tool in ToolName}
     for contract in contracts.values():
+        assert contract["inputSchema"].get("type") == "object"
+        assert contract["outputSchema"].get("type") == "object"
+        assert contract["errorSchema"].get("type") == "object"
         _assert_model_objects_are_closed(contract["inputSchema"])
         _assert_model_objects_are_closed(contract["outputSchema"])
         _assert_model_objects_are_closed(contract["errorSchema"])
@@ -103,6 +106,11 @@ def test_every_tool_has_strict_input_and_output_schema(platform: PlatformName) -
     assert "oneOf" in write_schema
     assert len(write_schema["oneOf"]) == 2
     assert "eof" not in json.dumps(write_schema)
+
+    for tool in (ToolName.SHELL_EXEC, ToolName.SHELL_READ):
+        output_schema = contracts[tool.value]["outputSchema"]
+        assert "oneOf" in output_schema
+        assert len(cast(list[object], output_schema["oneOf"])) == 5
 
 
 def test_real_json_schema_enforces_wire_input_constraints() -> None:
@@ -126,6 +134,11 @@ def test_real_json_schema_enforces_wire_input_constraints() -> None:
         (open_schema, {"cwd": "relative"}),
         (open_schema, {"env": {"A-B": "value"}}),
         (exec_schema, {"shell_id": "s", "command": "12345"}),
+        (write_schema, {"shell_id": "s", "exec_id": "e"}),
+        (
+            write_schema,
+            {"shell_id": "s", "exec_id": "e", "text": "x", "data_base64": "eA=="},
+        ),
         (write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "bad"}),
         (write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "AB=="}),
     ]

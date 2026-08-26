@@ -990,6 +990,7 @@
             "$ref": "#/$defs/ShellErrorExecutionSnapshot"
           }
         ],
+        "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       }
     },
@@ -2453,6 +2454,7 @@
             "$ref": "#/$defs/ShellErrorExecutionSnapshot"
           }
         ],
+        "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       }
     },
@@ -3225,6 +3227,7 @@
             "$ref": "#/$defs/ShellWriteBase64Input"
           }
         ],
+        "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       },
       "outputSchema": {
@@ -4261,6 +4264,7 @@
             "$ref": "#/$defs/ShellErrorExecutionSnapshot"
           }
         ],
+        "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       }
     },
@@ -5725,6 +5729,7 @@
             "$ref": "#/$defs/ShellErrorExecutionSnapshot"
           }
         ],
+        "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       }
     },
@@ -6497,6 +6502,7 @@
             "$ref": "#/$defs/ShellWriteBase64Input"
           }
         ],
+        "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       },
       "outputSchema": {

@@ -2,8 +2,9 @@
 
 面向 Agent 系统的基础 MCP 工具集合。项目希望为不同 Agent 提供一组稳定、可组合、低心智负担的通用能力，例如命令执行、文件读写与检索；具体能力优先复用成熟实现，只有现有方案无法满足核心约束时才考虑适配或自研。
 
-> 当前状态：macOS/Linux 已提供七个持久 Shell 工具及 stdio MCP Server。
-> Windows Runtime Profile 会在启动时保持关闭，直到原生进程能以原子方式纳入 Job Object。
+> 当前状态：macOS/Linux 与 Windows 11 x64 均已提供七个持久 Shell 工具及 stdio
+> MCP Server。Windows Runtime 使用 PowerShell 7.6、native ConPTY 和 gated-bootstrap
+> Job Object 进程所有权。
 
 ## 为什么做这个项目
 
@@ -91,6 +92,23 @@ uv run pytest --cov
 uv run tfbash-mcp
 ```
 
+使用 MCP Inspector 2.2 从当前本地源码启动并检查工具 discovery：
+
+```bash
+npx -y @modelcontextprotocol/inspector@2.2.0 --web \
+  uv \
+  --directory "$PWD" \
+  run tfbash-mcp \
+  --runtime-profile auto \
+  --host-profile ide \
+  --workspace-root "$PWD"
+```
+
+该命令必须在包含最终实现的分支或 worktree 中执行。连接后运行 `Tools` →
+`List Tools`，应恰好显示 `shell_open`、`shell_exec`、`shell_read`、`shell_write`、
+`shell_signal`、`shell_list` 和 `shell_close`。Server 默认使用 stdio，无需再传一个
+可能被 Inspector 当成自身选项的 `--transport stdio`。
+
 Server 注册 `shell_open`、`shell_exec`、`shell_read`、`shell_write`、
 `shell_signal`、`shell_list` 和 `shell_close`。默认使用当前目录作为 workspace root 和
 default cwd，并按宿主系统自动选择 Runtime Profile。IDE 集成应显式传入工作区：
@@ -106,14 +124,15 @@ uv run tfbash-mcp \
 `shell_list` 仅返回环境类型和可选名称，不返回环境变量名、值、启动命令或其他密钥材料。
 
 服务在 stdin EOF、客户端断开或取消时走同一个有界 shutdown 路径，关闭全部 Shell 及其
-受管进程。当前 Windows 启动会明确失败并写入 stderr，不会注册一个无法保证完整后代清理的
-伪生产实现。
+受管进程。`auto` 在 macOS/Linux 选择完整的 `PosixBashProfile`，在 Windows 11 x64
+选择完整的 `WindowsPwshProfile`；不会按单次工具调用混用方言或 transport。
 
 ## 参与决策
 
-需求文档当前已经确定 V1 的多 Shell + Execution 工具模型和 Python/pexpect 实现基线，但仍是待实现、待验收的 RFC。进入开发前，至少需要：
+V1 的多 Shell + Execution 工具模型和双 Runtime Profile 已实现并通过验收。后续协议或
+Runtime 变更仍须：
 
 1. 对齐文档中的硬性门槛和未决项；
-2. 对选定的 pexpect 基线执行最小可行性实验；
+2. 对受影响的真实 PTY/ConPTY 路径执行可复现实验；
 3. 确认 ide4ai 代码抽取的许可证保留方式、适配成本、长期维护面和退出策略；
 4. 把实验结果和最终实现偏差回写到 RFC，再进入编码与验收。

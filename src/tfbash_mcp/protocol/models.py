@@ -1145,6 +1145,15 @@ def _set_exit_code_maximum(schema: dict[str, object], maximum: int) -> None:
     properties["exit_code"]["maximum"] = maximum
 
 
+def _set_mcp_object_root(schema: dict[str, object]) -> None:
+    """Keep composed model schemas compatible with the MCP Tool wire shape."""
+
+    declared_type = schema.get("type")
+    if declared_type not in (None, "object"):
+        raise TypeError(f"MCP Tool schema root must be an object, got {declared_type!r}")
+    schema["type"] = "object"
+
+
 def tool_contract_schemas(
     config: ProtocolConfig = DEFAULT_PROTOCOL_CONFIG,
 ) -> dict[str, dict[str, dict[str, object]]]:
@@ -1153,6 +1162,7 @@ def tool_contract_schemas(
     contracts: dict[str, dict[str, dict[str, object]]] = {}
     for tool in ToolName:
         input_schema = _INPUT_ADAPTERS[tool].json_schema()
+        _set_mcp_object_root(input_schema)
         if tool is ToolName.SHELL_WRITE and "anyOf" in input_schema:
             input_schema["oneOf"] = input_schema.pop("anyOf")
         properties = cast(dict[str, dict[str, object]], input_schema.get("properties", {}))
@@ -1169,6 +1179,7 @@ def tool_contract_schemas(
         input_schema["x-requiredVocabulary"] = _PROTOCOL_SCHEMA_VOCABULARY
 
         output_schema = _OUTPUT_ADAPTERS[tool].json_schema()
+        _set_mcp_object_root(output_schema)
         maximum_exit_code = 4_294_967_295 if config.platform is PlatformName.WINDOWS else 255
         _set_exit_code_maximum(output_schema, maximum_exit_code)
         _bind_output_profile(tool, output_schema, config)

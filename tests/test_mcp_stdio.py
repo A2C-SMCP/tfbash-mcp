@@ -127,6 +127,11 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
                 "shell_close",
             ]
             assert all(tool.outputSchema is not None for tool in listed.tools)
+            assert all(tool.inputSchema.get("type") == "object" for tool in listed.tools)
+            assert all(
+                tool.outputSchema is not None and tool.outputSchema.get("type") == "object"
+                for tool in listed.tools
+            )
             assert all(
                 tool.meta is not None and "tfbash-mcp/errorSchema" in tool.meta
                 for tool in listed.tools
