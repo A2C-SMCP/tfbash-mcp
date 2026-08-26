@@ -21,6 +21,7 @@ async def _read_until_terminal(
     timeout_seconds: float = 30,
 ) -> dict[str, Any]:
     cursor = 0
+    output = ""
     deadline = anyio.current_time() + timeout_seconds
     last: dict[str, Any] = {}
     while anyio.current_time() < deadline:
@@ -38,8 +39,9 @@ async def _read_until_terminal(
             raise AssertionError(f"shell_read returned no structured result: {result.content}")
         last = result.structuredContent
         cursor = cast(int, last["next_cursor"])
+        output += cast(str, last["output"])
         if last["status"] != "running":
-            return last
+            return {**last, "output": output}
     raise AssertionError(f"execution did not become terminal: {last}")
 
 
@@ -99,10 +101,17 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             ]
             expected_dialect = "pwsh"
             command = "Write-Output mcp-e2e"
+            stdin_command = (
+                "Start-Sleep -Seconds 2; $value = [Console]::ReadLine(); "
+                'Write-Output "stdin:$value"'
+            )
+            stdin_text = "form-ready\r\n"
         else:
             runtime_arguments = []
             expected_dialect = "bash"
             command = "printf mcp-e2e"
+            stdin_command = "IFS= read -r value; printf 'stdin:%s' \"$value\""
+            stdin_text = "form-ready\n"
         parameters = StdioServerParameters(
             command=sys.executable,
             args=["-m", "tfbash_mcp", *runtime_arguments, *server_arguments],
@@ -139,6 +148,17 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             write_schema = next(
                 tool.inputSchema for tool in listed.tools if tool.name == "shell_write"
             )
+            assert list(write_schema["properties"]) == [
+                "shell_id",
+                "exec_id",
+                "text",
+                "data_base64",
+            ]
+            assert write_schema["required"] == ["shell_id", "exec_id"]
+            assert write_schema["oneOf"] == [
+                {"required": ["text"]},
+                {"required": ["data_base64"]},
+            ]
             assert "eof" not in str(write_schema)
 
             context_result = await session.call_tool("shell_list", {})
@@ -164,6 +184,32 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
                 )
             assert execution["status"] == "exited"
             assert cast(str, execution["output"]).strip() == "mcp-e2e"
+
+            waiting = await session.call_tool(
+                "shell_exec",
+                {
+                    "shell_id": shell_id,
+                    "command": stdin_command,
+                    "yield_ms": 0,
+                    "timeout_ms": 10_000,
+                },
+            )
+            waiting_content = cast(dict[str, Any], waiting.structuredContent)
+            assert waiting_content["status"] == "running"
+            exec_id = cast(str, waiting_content["exec_id"])
+            written = await session.call_tool(
+                "shell_write",
+                {"shell_id": shell_id, "exec_id": exec_id, "text": stdin_text},
+            )
+            written_content = cast(dict[str, Any], written.structuredContent)
+            assert written.isError is False
+            assert written_content["accepted_bytes"] == len(stdin_text.encode())
+            after_write = await _read_until_terminal(
+                session,
+                shell_id=shell_id,
+                exec_id=exec_id,
+            )
+            assert "stdin:form-ready" in cast(str, after_write["output"])
 
             closed = await session.call_tool("shell_close", {"shell_id": shell_id})
             closed_content = cast(dict[str, Any], closed.structuredContent)

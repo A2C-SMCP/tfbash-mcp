@@ -41,6 +41,7 @@ from tfbash_mcp.protocol import (
     validate_tool_input,
     validate_tool_output,
 )
+from tfbash_mcp.protocol.models import _flatten_shell_write_input_schema
 
 POSIX_CONFIG = ProtocolConfig(
     platform=PlatformName.MACOS,
@@ -103,14 +104,99 @@ def test_every_tool_has_strict_input_and_output_schema(platform: PlatformName) -
         _assert_model_objects_are_closed(contract["errorSchema"])
 
     write_schema = cast(dict[str, Any], contracts[ToolName.SHELL_WRITE.value]["inputSchema"])
-    assert "oneOf" in write_schema
-    assert len(write_schema["oneOf"]) == 2
+    assert list(write_schema["properties"]) == [
+        "shell_id",
+        "exec_id",
+        "text",
+        "data_base64",
+    ]
+    assert write_schema["required"] == ["shell_id", "exec_id"]
+    assert write_schema["oneOf"] == [
+        {"required": ["text"]},
+        {"required": ["data_base64"]},
+    ]
+    assert "$defs" not in write_schema
     assert "eof" not in json.dumps(write_schema)
 
     for tool in (ToolName.SHELL_EXEC, ToolName.SHELL_READ):
         output_schema = contracts[tool.value]["outputSchema"]
         assert "oneOf" in output_schema
         assert len(cast(list[object], output_schema["oneOf"])) == 5
+
+
+def _synthetic_write_union_schema() -> dict[str, object]:
+    common = {"title": "Common", "type": "string"}
+    return {
+        "$defs": {
+            "Text": {
+                "additionalProperties": False,
+                "properties": {
+                    "common": common,
+                    "text": {"title": "Text", "type": "string"},
+                },
+                "required": ["common", "text"],
+                "title": "Text",
+                "type": "object",
+            },
+            "Base64": {
+                "additionalProperties": False,
+                "properties": {
+                    "common": common,
+                    "data_base64": {"title": "Data Base64", "type": "string"},
+                },
+                "required": ["common", "data_base64"],
+                "title": "Base64",
+                "type": "object",
+            },
+        },
+        "anyOf": [{"$ref": "#/$defs/Text"}, {"$ref": "#/$defs/Base64"}],
+        "type": "object",
+    }
+
+
+def test_shell_write_schema_flattening_preserves_supported_union_semantics() -> None:
+    original = _synthetic_write_union_schema()
+    flattened = _flatten_shell_write_input_schema(original)
+    payloads = [
+        {"common": "c", "text": "x"},
+        {"common": "c", "data_base64": "eA=="},
+        {"common": "c"},
+        {"common": "c", "text": "x", "data_base64": "eA=="},
+        {"common": "c", "text": "x", "unknown": True},
+    ]
+
+    for payload in payloads:
+        assert Draft202012Validator(original).is_valid(payload) is Draft202012Validator(
+            flattened
+        ).is_valid(payload)
+
+
+@pytest.mark.parametrize(
+    "unsafe_shape",
+    ["branch_sibling", "variant_keyword", "multi_exclusive", "dynamic_reference"],
+)
+def test_shell_write_schema_flattening_rejects_shapes_it_cannot_prove_equivalent(
+    unsafe_shape: str,
+) -> None:
+    schema = _synthetic_write_union_schema()
+    definitions = cast(dict[str, Any], schema["$defs"])
+    branches = cast(list[dict[str, object]], schema["anyOf"])
+    text = cast(dict[str, Any], definitions["Text"])
+    if unsafe_shape == "branch_sibling":
+        branches[0]["minProperties"] = 2
+    elif unsafe_shape == "variant_keyword":
+        text["minProperties"] = 2
+    elif unsafe_shape == "multi_exclusive":
+        text["properties"]["checksum"] = {"title": "Checksum", "type": "string"}
+        text["required"].append("checksum")
+    else:
+        text["properties"]["text"] = {
+            "$dynamicRef": "#/$defs/Base64",
+            "title": "Text",
+        }
+
+    with pytest.raises(TypeError):
+        _flatten_shell_write_input_schema(schema)
 
 
 def test_real_json_schema_enforces_wire_input_constraints() -> None:
