@@ -105,11 +105,13 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
                 "Start-Sleep -Seconds 2; $value = [Console]::ReadLine(); "
                 'Write-Output "stdin:$value"'
             )
+            stdin_text = "form-ready\r\n"
         else:
             runtime_arguments = []
             expected_dialect = "bash"
             command = "printf mcp-e2e"
             stdin_command = "IFS= read -r value; printf 'stdin:%s' \"$value\""
+            stdin_text = "form-ready\n"
         parameters = StdioServerParameters(
             command=sys.executable,
             args=["-m", "tfbash_mcp", *runtime_arguments, *server_arguments],
@@ -197,11 +199,11 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             exec_id = cast(str, waiting_content["exec_id"])
             written = await session.call_tool(
                 "shell_write",
-                {"shell_id": shell_id, "exec_id": exec_id, "text": "form-ready\n"},
+                {"shell_id": shell_id, "exec_id": exec_id, "text": stdin_text},
             )
             written_content = cast(dict[str, Any], written.structuredContent)
             assert written.isError is False
-            assert written_content["accepted_bytes"] == len(b"form-ready\n")
+            assert written_content["accepted_bytes"] == len(stdin_text.encode())
             after_write = await _read_until_terminal(
                 session,
                 shell_id=shell_id,
