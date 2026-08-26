@@ -7,8 +7,6 @@ process APIs.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import os
 import sys
 from collections.abc import Iterator, Mapping
@@ -203,19 +201,6 @@ def _write_text(value: str, info: ValidationInfo) -> str:
     return value
 
 
-def _base64_payload(value: str, info: ValidationInfo) -> str:
-    try:
-        raw = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError("must be canonical base64") from exc
-    if base64.b64encode(raw).decode("ascii") != value:
-        raise ValueError("must be canonical base64")
-    maximum = _configured_limit(info, "max_write_bytes", 65_536)
-    if len(raw) > maximum:
-        raise ValueError(f"decoded value must not exceed {maximum} bytes")
-    return value
-
-
 def _env_key(value: str) -> str:
     _without_nul(value)
     first_is_valid = bool(value) and (
@@ -255,7 +240,6 @@ NonEmptyString: TypeAlias = Annotated[
 NativeAbsolutePath: TypeAlias = Annotated[str, AfterValidator(_native_absolute_path)]
 Command: TypeAlias = Annotated[str, StringConstraints(min_length=1), AfterValidator(_command)]
 WriteText: TypeAlias = Annotated[str, AfterValidator(_write_text)]
-Base64Payload: TypeAlias = Annotated[str, AfterValidator(_base64_payload)]
 EnvKey: TypeAlias = Annotated[
     str,
     StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"),
@@ -330,17 +314,12 @@ class _WriteInput(_StrictModel):
     exec_id: Identifier
 
 
-class ShellWriteTextInput(_WriteInput):
+class ShellWriteInput(_WriteInput):
     text: WriteText
-
-
-class ShellWriteBase64Input(_WriteInput):
-    data_base64: Base64Payload
 
 
 # EOF remains deliberately absent from the public V1 schema until native
 # Windows 11 and POSIX evidence prove identical persistent-shell semantics.
-ShellWriteInput: TypeAlias = ShellWriteTextInput | ShellWriteBase64Input
 
 
 class SignalName(str, Enum):
@@ -788,30 +767,6 @@ _IDENTIFIER_PROPERTY_NAMES = frozenset({"shell_id", "exec_id", "active_exec_id"}
 _PROTOCOL_SCHEMA_VOCABULARY = "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
 
 
-def _canonical_base64_pattern(maximum_decoded_bytes: int) -> str:
-    """Return a canonical base64 regex whose decoded payload fits the byte limit."""
-
-    full_group = r"[A-Za-z0-9+/]{4}"
-    one_byte = r"[A-Za-z0-9+/][AQgw]=="
-    two_bytes = r"[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]="
-    full_groups, remainder = divmod(maximum_decoded_bytes, 3)
-    alternatives: list[str] = []
-    if full_groups:
-        alternatives.extend(
-            [
-                rf"(?:{full_group}){{0,{full_groups - 1}}}(?:{one_byte}|{two_bytes})?",
-                rf"(?:{full_group}){{{full_groups}}}",
-            ]
-        )
-    else:
-        alternatives.append("")
-    if remainder >= 1:
-        alternatives.append(rf"(?:{full_group}){{{full_groups}}}{one_byte}")
-    if remainder >= 2:
-        alternatives.append(rf"(?:{full_group}){{{full_groups}}}{two_bytes}")
-    return rf"^(?:{'|'.join(alternatives)})$"
-
-
 def _update_string_variants(schema: dict[str, object], **updates: object) -> None:
     if schema.get("type") == "string":
         schema.update(updates)
@@ -866,19 +821,6 @@ def _is_strict_integer(_checker: object, instance: object) -> bool:
     return isinstance(instance, int) and not isinstance(instance, bool)
 
 
-def _validate_decoded_max_bytes(
-    _validator: object, limit: object, instance: object, _schema: object
-) -> Iterator[JsonSchemaValidationError]:
-    if not isinstance(limit, int) or not isinstance(instance, str):
-        return
-    try:
-        decoded = base64.b64decode(instance, validate=True)
-    except (binascii.Error, ValueError):
-        return
-    if len(decoded) > limit:
-        yield JsonSchemaValidationError(f"decoded payload exceeds {limit} bytes")
-
-
 def _validate_case_insensitive_unique_keys(
     _validator: object, enabled: object, instance: object, _schema: object
 ) -> Iterator[JsonSchemaValidationError]:
@@ -917,7 +859,6 @@ _ProtocolSchemaValidator = cast(Any, validators.extend)(
     {
         "x-validUtf8": _validate_utf8,
         "x-utf8-maxBytes": _validate_utf8_max_bytes,
-        "x-decoded-maxBytes": _validate_decoded_max_bytes,
         "x-caseInsensitiveUniqueKeys": _validate_case_insensitive_unique_keys,
         "x-fieldLessThanOrEqual": _validate_field_less_than_or_equal,
         "x-nativeAbsolutePath": _validate_native_absolute_path,
@@ -1006,15 +947,6 @@ def _enrich_wire_schema(schema: object, config: ProtocolConfig) -> None:
                     property_schema,
                     maxLength=config.max_write_bytes,
                     **{"x-utf8-maxBytes": config.max_write_bytes},
-                )
-            elif name == "data_base64":
-                encoded_maximum = ((config.max_write_bytes + 2) // 3) * 4
-                _update_string_variants(
-                    property_schema,
-                    pattern=_canonical_base64_pattern(config.max_write_bytes),
-                    maxLength=encoded_maximum,
-                    contentEncoding="base64",
-                    **{"x-decoded-maxBytes": config.max_write_bytes},
                 )
             elif name == "env" and config.platform is PlatformName.WINDOWS:
                 property_schema["x-caseInsensitiveUniqueKeys"] = True
@@ -1154,101 +1086,6 @@ def _set_mcp_object_root(schema: dict[str, object]) -> None:
     schema["type"] = "object"
 
 
-def _schema_contains_reference_keyword(schema: object) -> bool:
-    if isinstance(schema, dict):
-        return bool({"$ref", "$dynamicRef"} & schema.keys()) or any(
-            _schema_contains_reference_keyword(value) for value in schema.values()
-        )
-    if isinstance(schema, list):
-        return any(_schema_contains_reference_keyword(value) for value in schema)
-    return False
-
-
-def _flatten_shell_write_input_schema(schema: dict[str, object]) -> dict[str, object]:
-    """Expose fields for the exact closed-union shape used by ``shell_write``."""
-
-    if set(schema) != {"$defs", "anyOf", "type"} or schema.get("type") != "object":
-        raise TypeError("shell_write union root contains unsupported schema keywords")
-
-    definitions = schema.get("$defs")
-    branches = schema.get("anyOf")
-    if not isinstance(definitions, dict) or not isinstance(branches, list) or not branches:
-        raise TypeError("object union schema must contain $defs and non-empty anyOf")
-
-    variants: list[dict[str, object]] = []
-    referenced_definitions: set[str] = set()
-    for branch in branches:
-        if not isinstance(branch, dict) or set(branch) != {"$ref"}:
-            raise TypeError("shell_write union branches must contain only $ref")
-        reference = branch.get("$ref")
-        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
-            raise TypeError("object union branch must reference a local $defs schema")
-        definition_name = reference.removeprefix("#/$defs/")
-        referenced_definitions.add(definition_name)
-        variant = definitions.get(definition_name)
-        if not isinstance(variant, dict):
-            raise TypeError(f"object union branch references missing schema {reference!r}")
-        if set(variant) != {
-            "additionalProperties",
-            "properties",
-            "required",
-            "title",
-            "type",
-        }:
-            raise TypeError("shell_write union variants contain unsupported schema keywords")
-        if variant.get("type") != "object" or variant.get("additionalProperties") is not False:
-            raise TypeError("object union variants must be closed object schemas")
-        variants.append(cast(dict[str, object], variant))
-    if set(definitions) != referenced_definitions:
-        raise TypeError("shell_write union contains unreferenced or nested definitions")
-
-    required_by_variant: list[list[str]] = []
-    merged_properties: dict[str, object] = {}
-    for variant in variants:
-        properties = variant.get("properties")
-        required = variant.get("required")
-        if (
-            not isinstance(properties, dict)
-            or not isinstance(required, list)
-            or not all(isinstance(name, str) for name in required)
-        ):
-            raise TypeError("object union variants must declare properties and required fields")
-        required_names = cast(list[str], required)
-        if set(properties) != set(required_names):
-            raise TypeError("form-compatible object union variants cannot have optional fields")
-        required_by_variant.append(required_names)
-        for name, property_schema in properties.items():
-            if _schema_contains_reference_keyword(property_schema):
-                raise TypeError("shell_write union properties cannot contain reference keywords")
-            if name in merged_properties and merged_properties[name] != property_schema:
-                raise TypeError(f"object union property {name!r} has conflicting schemas")
-            merged_properties[name] = property_schema
-
-    common_required = [
-        name
-        for name in required_by_variant[0]
-        if all(name in required for required in required_by_variant[1:])
-    ]
-    exclusive_required = [
-        [name for name in required if name not in common_required]
-        for required in required_by_variant
-    ]
-    if any(len(required) != 1 for required in exclusive_required):
-        raise TypeError("shell_write union variants must each have one exclusive required field")
-    exclusive_names = [required[0] for required in exclusive_required]
-    if len(set(exclusive_names)) != len(exclusive_names):
-        raise TypeError("shell_write union variants must have unique exclusive required fields")
-
-    return {
-        "additionalProperties": False,
-        "properties": merged_properties,
-        "required": common_required,
-        "oneOf": [{"required": required} for required in exclusive_required],
-        "title": "ShellWriteInput",
-        "type": "object",
-    }
-
-
 def tool_contract_schemas(
     config: ProtocolConfig = DEFAULT_PROTOCOL_CONFIG,
 ) -> dict[str, dict[str, dict[str, object]]]:
@@ -1258,8 +1095,6 @@ def tool_contract_schemas(
     for tool in ToolName:
         input_schema = _INPUT_ADAPTERS[tool].json_schema()
         _set_mcp_object_root(input_schema)
-        if tool is ToolName.SHELL_WRITE:
-            input_schema = _flatten_shell_write_input_schema(input_schema)
         properties = cast(dict[str, dict[str, object]], input_schema.get("properties", {}))
         configured_defaults = cast(dict[str, object], _configured_payload(tool, {}, config))
         for key, default in configured_defaults.items():

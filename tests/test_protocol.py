@@ -29,8 +29,7 @@ from tfbash_mcp.protocol import (
     ShellOpenInput,
     ShellOpenResult,
     ShellSignalInput,
-    ShellWriteBase64Input,
-    ShellWriteTextInput,
+    ShellWriteInput,
     SignalName,
     TimeoutExecutionSnapshot,
     ToolName,
@@ -41,7 +40,6 @@ from tfbash_mcp.protocol import (
     validate_tool_input,
     validate_tool_output,
 )
-from tfbash_mcp.protocol.models import _flatten_shell_write_input_schema
 
 POSIX_CONFIG = ProtocolConfig(
     platform=PlatformName.MACOS,
@@ -104,99 +102,17 @@ def test_every_tool_has_strict_input_and_output_schema(platform: PlatformName) -
         _assert_model_objects_are_closed(contract["errorSchema"])
 
     write_schema = cast(dict[str, Any], contracts[ToolName.SHELL_WRITE.value]["inputSchema"])
-    assert list(write_schema["properties"]) == [
-        "shell_id",
-        "exec_id",
-        "text",
-        "data_base64",
-    ]
-    assert write_schema["required"] == ["shell_id", "exec_id"]
-    assert write_schema["oneOf"] == [
-        {"required": ["text"]},
-        {"required": ["data_base64"]},
-    ]
+    assert list(write_schema["properties"]) == ["shell_id", "exec_id", "text"]
+    assert write_schema["required"] == ["shell_id", "exec_id", "text"]
+    assert "oneOf" not in write_schema
     assert "$defs" not in write_schema
+    assert "data_base64" not in json.dumps(write_schema)
     assert "eof" not in json.dumps(write_schema)
 
     for tool in (ToolName.SHELL_EXEC, ToolName.SHELL_READ):
         output_schema = contracts[tool.value]["outputSchema"]
         assert "oneOf" in output_schema
         assert len(cast(list[object], output_schema["oneOf"])) == 5
-
-
-def _synthetic_write_union_schema() -> dict[str, object]:
-    common = {"title": "Common", "type": "string"}
-    return {
-        "$defs": {
-            "Text": {
-                "additionalProperties": False,
-                "properties": {
-                    "common": common,
-                    "text": {"title": "Text", "type": "string"},
-                },
-                "required": ["common", "text"],
-                "title": "Text",
-                "type": "object",
-            },
-            "Base64": {
-                "additionalProperties": False,
-                "properties": {
-                    "common": common,
-                    "data_base64": {"title": "Data Base64", "type": "string"},
-                },
-                "required": ["common", "data_base64"],
-                "title": "Base64",
-                "type": "object",
-            },
-        },
-        "anyOf": [{"$ref": "#/$defs/Text"}, {"$ref": "#/$defs/Base64"}],
-        "type": "object",
-    }
-
-
-def test_shell_write_schema_flattening_preserves_supported_union_semantics() -> None:
-    original = _synthetic_write_union_schema()
-    flattened = _flatten_shell_write_input_schema(original)
-    payloads = [
-        {"common": "c", "text": "x"},
-        {"common": "c", "data_base64": "eA=="},
-        {"common": "c"},
-        {"common": "c", "text": "x", "data_base64": "eA=="},
-        {"common": "c", "text": "x", "unknown": True},
-    ]
-
-    for payload in payloads:
-        assert Draft202012Validator(original).is_valid(payload) is Draft202012Validator(
-            flattened
-        ).is_valid(payload)
-
-
-@pytest.mark.parametrize(
-    "unsafe_shape",
-    ["branch_sibling", "variant_keyword", "multi_exclusive", "dynamic_reference"],
-)
-def test_shell_write_schema_flattening_rejects_shapes_it_cannot_prove_equivalent(
-    unsafe_shape: str,
-) -> None:
-    schema = _synthetic_write_union_schema()
-    definitions = cast(dict[str, Any], schema["$defs"])
-    branches = cast(list[dict[str, object]], schema["anyOf"])
-    text = cast(dict[str, Any], definitions["Text"])
-    if unsafe_shape == "branch_sibling":
-        branches[0]["minProperties"] = 2
-    elif unsafe_shape == "variant_keyword":
-        text["minProperties"] = 2
-    elif unsafe_shape == "multi_exclusive":
-        text["properties"]["checksum"] = {"title": "Checksum", "type": "string"}
-        text["required"].append("checksum")
-    else:
-        text["properties"]["text"] = {
-            "$dynamicRef": "#/$defs/Base64",
-            "title": "Text",
-        }
-
-    with pytest.raises(TypeError):
-        _flatten_shell_write_input_schema(schema)
 
 
 def test_real_json_schema_enforces_wire_input_constraints() -> None:
@@ -214,19 +130,14 @@ def test_real_json_schema_enforces_wire_input_constraints() -> None:
 
     _validate_schema(open_schema, {"cwd": "/tmp", "env": {"OK": "yes"}})
     _validate_schema(exec_schema, {"shell_id": "s", "command": "true"})
-    _validate_schema(write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "AA=="})
+    _validate_schema(write_schema, {"shell_id": "s", "exec_id": "e", "text": "ok"})
 
     invalid_pairs = [
         (open_schema, {"cwd": "relative"}),
         (open_schema, {"env": {"A-B": "value"}}),
         (exec_schema, {"shell_id": "s", "command": "12345"}),
         (write_schema, {"shell_id": "s", "exec_id": "e"}),
-        (
-            write_schema,
-            {"shell_id": "s", "exec_id": "e", "text": "x", "data_base64": "eA=="},
-        ),
-        (write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "bad"}),
-        (write_schema, {"shell_id": "s", "exec_id": "e", "data_base64": "AB=="}),
+        (write_schema, {"shell_id": "s", "exec_id": "e", "text": "x", "data_base64": "eA=="}),
     ]
     for schema, payload in invalid_pairs:
         with pytest.raises(JsonSchemaValidationError):
@@ -262,10 +173,6 @@ def test_required_schema_vocabulary_enforces_nonstandard_runtime_constraints() -
         (
             posix[ToolName.SHELL_WRITE.value]["inputSchema"],
             {"shell_id": "s", "exec_id": "e", "text": "界"},
-        ),
-        (
-            posix[ToolName.SHELL_WRITE.value]["inputSchema"],
-            {"shell_id": "s", "exec_id": "e", "data_base64": "AAAA"},
         ),
         (
             windows[ToolName.SHELL_OPEN.value]["inputSchema"],
@@ -531,17 +438,13 @@ def test_identifiers_use_utf8_byte_limits() -> None:
         validate_tool_input(ToolName.SHELL_CLOSE, {"shell_id": "界" * 43})
 
 
-@pytest.mark.parametrize(
-    ("payload", "expected_type"),
-    [
-        ({"shell_id": "s", "exec_id": "e", "text": "yes\n"}, ShellWriteTextInput),
-        ({"shell_id": "s", "exec_id": "e", "data_base64": "AA=="}, ShellWriteBase64Input),
-    ],
-)
-def test_write_one_of_accepts_exactly_one_variant(
-    payload: dict[str, object], expected_type: type[object]
-) -> None:
-    assert isinstance(validate_tool_input(ToolName.SHELL_WRITE, payload), expected_type)
+def test_write_accepts_utf8_text() -> None:
+    result = validate_tool_input(
+        ToolName.SHELL_WRITE,
+        {"shell_id": "s", "exec_id": "e", "text": "yes\n"},
+    )
+    assert isinstance(result, ShellWriteInput)
+    assert result.text == "yes\n"
 
 
 @pytest.mark.parametrize(
@@ -549,12 +452,11 @@ def test_write_one_of_accepts_exactly_one_variant(
     [
         {"shell_id": "s", "exec_id": "e"},
         {"shell_id": "s", "exec_id": "e", "text": "x", "data_base64": "eA=="},
-        {"shell_id": "s", "exec_id": "e", "data_base64": "not-base64"},
-        {"shell_id": "s", "exec_id": "e", "data_base64": "AB=="},
+        {"shell_id": "s", "exec_id": "e", "data_base64": "eA=="},
         {"shell_id": "s", "exec_id": "e", "eof": True},
     ],
 )
-def test_write_one_of_rejects_conflicts_invalid_base64_and_provisional_eof(
+def test_write_rejects_missing_text_removed_base64_and_provisional_eof(
     payload: dict[str, object],
 ) -> None:
     with pytest.raises(ProtocolValidationError):

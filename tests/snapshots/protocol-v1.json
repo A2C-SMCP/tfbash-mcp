@@ -3146,28 +3146,7 @@
       },
       "inputSchema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "required": [
-              "text"
-            ]
-          },
-          {
-            "required": [
-              "data_base64"
-            ]
-          }
-        ],
         "properties": {
-          "data_base64": {
-            "contentEncoding": "base64",
-            "maxLength": 87384,
-            "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){0,21844}(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?|(?:[A-Za-z0-9+/]{4}){21845}|(?:[A-Za-z0-9+/]{4}){21845}[A-Za-z0-9+/][AQgw]==)$",
-            "title": "Data Base64",
-            "type": "string",
-            "x-decoded-maxBytes": 65536,
-            "x-validUtf8": true
-          },
           "exec_id": {
             "maxLength": 128,
             "minLength": 1,
@@ -3194,7 +3173,8 @@
         },
         "required": [
           "shell_id",
-          "exec_id"
+          "exec_id",
+          "text"
         ],
         "title": "ShellWriteInput",
         "type": "object",
@@ -6391,28 +6371,7 @@
       },
       "inputSchema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "required": [
-              "text"
-            ]
-          },
-          {
-            "required": [
-              "data_base64"
-            ]
-          }
-        ],
         "properties": {
-          "data_base64": {
-            "contentEncoding": "base64",
-            "maxLength": 87384,
-            "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){0,21844}(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?|(?:[A-Za-z0-9+/]{4}){21845}|(?:[A-Za-z0-9+/]{4}){21845}[A-Za-z0-9+/][AQgw]==)$",
-            "title": "Data Base64",
-            "type": "string",
-            "x-decoded-maxBytes": 65536,
-            "x-validUtf8": true
-          },
           "exec_id": {
             "maxLength": 128,
             "minLength": 1,
@@ -6439,7 +6398,8 @@
         },
         "required": [
           "shell_id",
-          "exec_id"
+          "exec_id",
+          "text"
         ],
         "title": "ShellWriteInput",
         "type": "object",

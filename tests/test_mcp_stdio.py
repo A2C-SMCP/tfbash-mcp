@@ -148,17 +148,10 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             write_schema = next(
                 tool.inputSchema for tool in listed.tools if tool.name == "shell_write"
             )
-            assert list(write_schema["properties"]) == [
-                "shell_id",
-                "exec_id",
-                "text",
-                "data_base64",
-            ]
-            assert write_schema["required"] == ["shell_id", "exec_id"]
-            assert write_schema["oneOf"] == [
-                {"required": ["text"]},
-                {"required": ["data_base64"]},
-            ]
+            assert list(write_schema["properties"]) == ["shell_id", "exec_id", "text"]
+            assert write_schema["required"] == ["shell_id", "exec_id", "text"]
+            assert "oneOf" not in write_schema
+            assert "data_base64" not in str(write_schema)
             assert "eof" not in str(write_schema)
 
             context_result = await session.call_tool("shell_list", {})

@@ -33,6 +33,7 @@ from tfbash_mcp.runtime import (
 @dataclass
 class FakeManager:
     starts: list[ShellStartRequest] = field(default_factory=list)
+    writes: list[tuple[str, str, bytes]] = field(default_factory=list)
     exec_error: Exception | None = None
     close_error: Exception | None = None
     shutdown_calls: int = 0
@@ -92,7 +93,7 @@ class FakeManager:
         )
 
     def write(self, shell_id: str, exec_id: str, data: bytes) -> int:
-        del shell_id, exec_id
+        self.writes.append((shell_id, exec_id, data))
         return len(data)
 
     def signal(self, shell_id: str, exec_id: str, intent: ControlIntent) -> bool:
@@ -175,7 +176,7 @@ def test_successes_and_expected_errors_are_structured_contract_results() -> None
     )
     write = service.call(
         "shell_write",
-        {"shell_id": "shell_1", "exec_id": "exec_1", "data_base64": "aGk="},
+        {"shell_id": "shell_1", "exec_id": "exec_1", "text": "你好"},
     )
     signal = service.call(
         "shell_signal",
@@ -192,7 +193,8 @@ def test_successes_and_expected_errors_are_structured_contract_results() -> None
     assert read.structuredContent is not None
     assert read.structuredContent["status"] == "running"
     assert write.structuredContent is not None
-    assert write.structuredContent["accepted_bytes"] == 2
+    assert write.structuredContent["accepted_bytes"] == 6
+    assert manager.writes == [("shell_1", "exec_1", "你好".encode())]
     assert signal.structuredContent is not None
     assert signal.structuredContent["status"] == "delivered"
     assert close.structuredContent is not None

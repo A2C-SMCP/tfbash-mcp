@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from collections.abc import Callable
@@ -39,8 +38,7 @@ from tfbash_mcp.protocol import (
     ShellOpenInput,
     ShellReadInput,
     ShellSignalInput,
-    ShellWriteBase64Input,
-    ShellWriteTextInput,
+    ShellWriteInput,
     ToolName,
     make_error,
     model_to_wire,
@@ -243,13 +241,8 @@ class ShellToolService:
                 )
             )
         if tool is ToolName.SHELL_WRITE:
-            write_request: ShellWriteTextInput | ShellWriteBase64Input
-            if isinstance(request, ShellWriteTextInput):
-                payload = request.text.encode("utf-8")
-                write_request = request
-            else:
-                write_request = cast(ShellWriteBase64Input, request)
-                payload = base64.b64decode(write_request.data_base64, validate=True)
+            write_request = cast(ShellWriteInput, request)
+            payload = write_request.text.encode("utf-8")
             accepted = self._manager.write(write_request.shell_id, write_request.exec_id, payload)
             return {
                 "shell_id": write_request.shell_id,

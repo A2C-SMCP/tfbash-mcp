@@ -279,7 +279,7 @@ class RuntimeComposition:
             "shell_open": f"Open a persistent {dialect} command shell.",
             "shell_exec": f"Execute one {dialect} command in a persistent shell.",
             "shell_read": "Read incremental output from an execution cursor.",
-            "shell_write": "Write input bytes to the active execution.",
+            "shell_write": "Write UTF-8 text to the active execution.",
             "shell_signal": "Send a portable control intent to the active execution.",
             "shell_list": "List shells with authoritative runtime and redacted host context.",
             "shell_close": "Close a persistent shell and its managed process tree.",
