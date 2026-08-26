@@ -101,7 +101,9 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             ]
             expected_dialect = "pwsh"
             command = "Write-Output mcp-e2e"
-            stdin_command = '$value = Read-Host; Write-Output "stdin:$value"'
+            stdin_command = (
+                'Start-Sleep -Seconds 2; $value = Read-Host; Write-Output "stdin:$value"'
+            )
         else:
             runtime_arguments = []
             expected_dialect = "bash"
