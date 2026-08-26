@@ -86,6 +86,39 @@ uv run mypy
 uv run pytest --cov
 ```
 
+## CI、PR 合并与 PyPI 发布
+
+Pull Request 和 `main` 分支使用同一套 `Tests` 质量门禁，在 Python 3.10、3.11、3.12
+上执行 `ruff check`、`ruff format --check`、`mypy` 和完整测试。为确保检查失败时不能合并，
+仓库管理员需要在 GitHub 的 `main` branch ruleset 中启用 **Require a pull request before
+merging** 和 **Require status checks to pass**，并把 `Python 3.10`、`Python 3.11`、
+`Python 3.12` 三个检查设为 required。
+
+PyPI 发布由 [publish workflow](.github/workflows/publish.yml) 完成。它只在 GitHub Release
+进入 `published` 状态时触发，并先复用上述完整质量门禁；全部通过后才校验 release tag、
+构建并验证 wheel/sdist、安装 wheel 做 smoke test，最后通过 PyPI Trusted Publishing 上传。
+发布 Job 使用 GitHub OIDC 短期凭证，仓库不保存 PyPI API Token。
+
+首次发布前需要完成一次配置：
+
+1. 在 GitHub 仓库 **Settings → Environments** 创建名为 `pypi` 的 Environment；建议增加
+   required reviewers，并将 deployment branches/tags 限制为 release tags。
+2. `tfbash-mcp` 尚未存在于 PyPI 时，在 PyPI 的 **Publishing** 页面创建 pending Trusted
+   Publisher；项目名填写 `tfbash-mcp`，Owner 填写 `A2C-SMCP`，Repository 填写
+   `tfbash-mcp`，Workflow name 填写 `publish.yml`，Environment 填写 `pypi`。首次成功发布
+   后 pending publisher 会自动成为该项目的正式 publisher。
+3. 按上一段配置 GitHub `main` branch ruleset，确保 PR 不能绕过质量门禁合并。
+
+每次发布都必须先在 PR 中更新 `pyproject.toml` 的版本并通过 required checks。合并到
+`main` 后创建与版本完全一致的 `v<version>` GitHub Release，例如：
+
+```bash
+gh release create v0.1.0 --target main --generate-notes
+```
+
+Release tag 与 `pyproject.toml` 版本不一致，或 tag 指向的提交不属于 `main` 时，发布会在
+上传 PyPI 前失败。PyPI 上的版本文件不可覆盖，因此每次重发都必须使用新版本号。
+
 启动 stdio Server：
 
 ```bash

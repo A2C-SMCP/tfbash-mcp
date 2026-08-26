@@ -1,0 +1,110 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Quality gate
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  build:
+    name: Build distributions
+    needs: quality
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout tested release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          version: "0.8.17"
+          python-version: "3.12.10"
+
+      - name: Verify release tag and source commit
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          package_version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          expected_tag="v${package_version}"
+          if [[ "${RELEASE_TAG}" != "${expected_tag}" ]]; then
+            echo "Release tag ${RELEASE_TAG} must match pyproject.toml version ${expected_tag}." >&2
+            exit 1
+          fi
+
+          git fetch origin main --no-tags
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Release commit must be reachable from origin/main." >&2
+            exit 1
+          fi
+
+      - name: Build source and wheel distributions
+        run: |
+          uv build --sdist --no-sources
+          uv build --wheel --no-sources dist/*.tar.gz
+
+      - name: Validate distributions
+        run: |
+          uvx --from twine==7.0.0 twine check --strict dist/*
+          python - <<'PY'
+          from pathlib import Path
+
+          wheels = sorted(path.name for path in Path("dist").glob("*.whl"))
+          sdists = sorted(path.name for path in Path("dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              raise SystemExit(f"Expected one wheel and one sdist, found: {wheels + sdists}")
+          PY
+
+      - name: Smoke test built wheel
+        run: |
+          uv venv --python 3.12.10 "${RUNNER_TEMP}/package-smoke"
+          uv pip install --python "${RUNNER_TEMP}/package-smoke/bin/python" dist/*.whl
+          "${RUNNER_TEMP}/package-smoke/bin/tfbash-mcp" --help
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-package-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish distributions
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tfbash-mcp
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
