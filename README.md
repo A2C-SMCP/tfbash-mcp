@@ -107,7 +107,9 @@ npx -y @modelcontextprotocol/inspector@2.2.0 --web \
 该命令必须在包含最终实现的分支或 worktree 中执行。连接后运行 `Tools` →
 `List Tools`，应恰好显示 `shell_open`、`shell_exec`、`shell_read`、`shell_write`、
 `shell_signal`、`shell_list` 和 `shell_close`。Server 默认使用 stdio，无需再传一个
-可能被 Inspector 当成自身选项的 `--transport stdio`。
+可能被 Inspector 当成自身选项的 `--transport stdio`。选择 `shell_write` 时，Inspector
+应显示 `shell_id`、`exec_id`、`text` 和 `data_base64` 四个输入字段；`text` 与
+`data_base64` 必须且只能填写一个。
 
 Server 注册 `shell_open`、`shell_exec`、`shell_read`、`shell_write`、
 `shell_signal`、`shell_list` 和 `shell_close`。默认使用当前目录作为 workspace root 和

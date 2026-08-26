@@ -3145,88 +3145,58 @@
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       },
       "inputSchema": {
-        "$defs": {
-          "ShellWriteBase64Input": {
-            "additionalProperties": false,
-            "properties": {
-              "data_base64": {
-                "contentEncoding": "base64",
-                "maxLength": 87384,
-                "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){0,21844}(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?|(?:[A-Za-z0-9+/]{4}){21845}|(?:[A-Za-z0-9+/]{4}){21845}[A-Za-z0-9+/][AQgw]==)$",
-                "title": "Data Base64",
-                "type": "string",
-                "x-decoded-maxBytes": 65536,
-                "x-validUtf8": true
-              },
-              "exec_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Exec Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              },
-              "shell_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Shell Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "shell_id",
-              "exec_id",
-              "data_base64"
-            ],
-            "title": "ShellWriteBase64Input",
-            "type": "object"
-          },
-          "ShellWriteTextInput": {
-            "additionalProperties": false,
-            "properties": {
-              "exec_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Exec Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              },
-              "shell_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Shell Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              },
-              "text": {
-                "maxLength": 65536,
-                "title": "Text",
-                "type": "string",
-                "x-utf8-maxBytes": 65536,
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "shell_id",
-              "exec_id",
-              "text"
-            ],
-            "title": "ShellWriteTextInput",
-            "type": "object"
-          }
-        },
+        "additionalProperties": false,
         "oneOf": [
           {
-            "$ref": "#/$defs/ShellWriteTextInput"
+            "required": [
+              "text"
+            ]
           },
           {
-            "$ref": "#/$defs/ShellWriteBase64Input"
+            "required": [
+              "data_base64"
+            ]
           }
         ],
+        "properties": {
+          "data_base64": {
+            "contentEncoding": "base64",
+            "maxLength": 87384,
+            "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){0,21844}(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?|(?:[A-Za-z0-9+/]{4}){21845}|(?:[A-Za-z0-9+/]{4}){21845}[A-Za-z0-9+/][AQgw]==)$",
+            "title": "Data Base64",
+            "type": "string",
+            "x-decoded-maxBytes": 65536,
+            "x-validUtf8": true
+          },
+          "exec_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Exec Id",
+            "type": "string",
+            "x-utf8-maxBytes": 128,
+            "x-validUtf8": true
+          },
+          "shell_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Shell Id",
+            "type": "string",
+            "x-utf8-maxBytes": 128,
+            "x-validUtf8": true
+          },
+          "text": {
+            "maxLength": 65536,
+            "title": "Text",
+            "type": "string",
+            "x-utf8-maxBytes": 65536,
+            "x-validUtf8": true
+          }
+        },
+        "required": [
+          "shell_id",
+          "exec_id"
+        ],
+        "title": "ShellWriteInput",
         "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       },
@@ -6420,88 +6390,58 @@
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       },
       "inputSchema": {
-        "$defs": {
-          "ShellWriteBase64Input": {
-            "additionalProperties": false,
-            "properties": {
-              "data_base64": {
-                "contentEncoding": "base64",
-                "maxLength": 87384,
-                "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){0,21844}(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?|(?:[A-Za-z0-9+/]{4}){21845}|(?:[A-Za-z0-9+/]{4}){21845}[A-Za-z0-9+/][AQgw]==)$",
-                "title": "Data Base64",
-                "type": "string",
-                "x-decoded-maxBytes": 65536,
-                "x-validUtf8": true
-              },
-              "exec_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Exec Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              },
-              "shell_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Shell Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "shell_id",
-              "exec_id",
-              "data_base64"
-            ],
-            "title": "ShellWriteBase64Input",
-            "type": "object"
-          },
-          "ShellWriteTextInput": {
-            "additionalProperties": false,
-            "properties": {
-              "exec_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Exec Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              },
-              "shell_id": {
-                "maxLength": 128,
-                "minLength": 1,
-                "title": "Shell Id",
-                "type": "string",
-                "x-utf8-maxBytes": 128,
-                "x-validUtf8": true
-              },
-              "text": {
-                "maxLength": 65536,
-                "title": "Text",
-                "type": "string",
-                "x-utf8-maxBytes": 65536,
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "shell_id",
-              "exec_id",
-              "text"
-            ],
-            "title": "ShellWriteTextInput",
-            "type": "object"
-          }
-        },
+        "additionalProperties": false,
         "oneOf": [
           {
-            "$ref": "#/$defs/ShellWriteTextInput"
+            "required": [
+              "text"
+            ]
           },
           {
-            "$ref": "#/$defs/ShellWriteBase64Input"
+            "required": [
+              "data_base64"
+            ]
           }
         ],
+        "properties": {
+          "data_base64": {
+            "contentEncoding": "base64",
+            "maxLength": 87384,
+            "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){0,21844}(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?|(?:[A-Za-z0-9+/]{4}){21845}|(?:[A-Za-z0-9+/]{4}){21845}[A-Za-z0-9+/][AQgw]==)$",
+            "title": "Data Base64",
+            "type": "string",
+            "x-decoded-maxBytes": 65536,
+            "x-validUtf8": true
+          },
+          "exec_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Exec Id",
+            "type": "string",
+            "x-utf8-maxBytes": 128,
+            "x-validUtf8": true
+          },
+          "shell_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Shell Id",
+            "type": "string",
+            "x-utf8-maxBytes": 128,
+            "x-validUtf8": true
+          },
+          "text": {
+            "maxLength": 65536,
+            "title": "Text",
+            "type": "string",
+            "x-utf8-maxBytes": 65536,
+            "x-validUtf8": true
+          }
+        },
+        "required": [
+          "shell_id",
+          "exec_id"
+        ],
+        "title": "ShellWriteInput",
         "type": "object",
         "x-requiredVocabulary": "https://github.com/A2C-SMCP/tfbash-mcp/schema/v1"
       },

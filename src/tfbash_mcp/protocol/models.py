@@ -1154,6 +1154,101 @@ def _set_mcp_object_root(schema: dict[str, object]) -> None:
     schema["type"] = "object"
 
 
+def _schema_contains_reference_keyword(schema: object) -> bool:
+    if isinstance(schema, dict):
+        return bool({"$ref", "$dynamicRef"} & schema.keys()) or any(
+            _schema_contains_reference_keyword(value) for value in schema.values()
+        )
+    if isinstance(schema, list):
+        return any(_schema_contains_reference_keyword(value) for value in schema)
+    return False
+
+
+def _flatten_shell_write_input_schema(schema: dict[str, object]) -> dict[str, object]:
+    """Expose fields for the exact closed-union shape used by ``shell_write``."""
+
+    if set(schema) != {"$defs", "anyOf", "type"} or schema.get("type") != "object":
+        raise TypeError("shell_write union root contains unsupported schema keywords")
+
+    definitions = schema.get("$defs")
+    branches = schema.get("anyOf")
+    if not isinstance(definitions, dict) or not isinstance(branches, list) or not branches:
+        raise TypeError("object union schema must contain $defs and non-empty anyOf")
+
+    variants: list[dict[str, object]] = []
+    referenced_definitions: set[str] = set()
+    for branch in branches:
+        if not isinstance(branch, dict) or set(branch) != {"$ref"}:
+            raise TypeError("shell_write union branches must contain only $ref")
+        reference = branch.get("$ref")
+        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+            raise TypeError("object union branch must reference a local $defs schema")
+        definition_name = reference.removeprefix("#/$defs/")
+        referenced_definitions.add(definition_name)
+        variant = definitions.get(definition_name)
+        if not isinstance(variant, dict):
+            raise TypeError(f"object union branch references missing schema {reference!r}")
+        if set(variant) != {
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type",
+        }:
+            raise TypeError("shell_write union variants contain unsupported schema keywords")
+        if variant.get("type") != "object" or variant.get("additionalProperties") is not False:
+            raise TypeError("object union variants must be closed object schemas")
+        variants.append(cast(dict[str, object], variant))
+    if set(definitions) != referenced_definitions:
+        raise TypeError("shell_write union contains unreferenced or nested definitions")
+
+    required_by_variant: list[list[str]] = []
+    merged_properties: dict[str, object] = {}
+    for variant in variants:
+        properties = variant.get("properties")
+        required = variant.get("required")
+        if (
+            not isinstance(properties, dict)
+            or not isinstance(required, list)
+            or not all(isinstance(name, str) for name in required)
+        ):
+            raise TypeError("object union variants must declare properties and required fields")
+        required_names = cast(list[str], required)
+        if set(properties) != set(required_names):
+            raise TypeError("form-compatible object union variants cannot have optional fields")
+        required_by_variant.append(required_names)
+        for name, property_schema in properties.items():
+            if _schema_contains_reference_keyword(property_schema):
+                raise TypeError("shell_write union properties cannot contain reference keywords")
+            if name in merged_properties and merged_properties[name] != property_schema:
+                raise TypeError(f"object union property {name!r} has conflicting schemas")
+            merged_properties[name] = property_schema
+
+    common_required = [
+        name
+        for name in required_by_variant[0]
+        if all(name in required for required in required_by_variant[1:])
+    ]
+    exclusive_required = [
+        [name for name in required if name not in common_required]
+        for required in required_by_variant
+    ]
+    if any(len(required) != 1 for required in exclusive_required):
+        raise TypeError("shell_write union variants must each have one exclusive required field")
+    exclusive_names = [required[0] for required in exclusive_required]
+    if len(set(exclusive_names)) != len(exclusive_names):
+        raise TypeError("shell_write union variants must have unique exclusive required fields")
+
+    return {
+        "additionalProperties": False,
+        "properties": merged_properties,
+        "required": common_required,
+        "oneOf": [{"required": required} for required in exclusive_required],
+        "title": "ShellWriteInput",
+        "type": "object",
+    }
+
+
 def tool_contract_schemas(
     config: ProtocolConfig = DEFAULT_PROTOCOL_CONFIG,
 ) -> dict[str, dict[str, dict[str, object]]]:
@@ -1163,8 +1258,8 @@ def tool_contract_schemas(
     for tool in ToolName:
         input_schema = _INPUT_ADAPTERS[tool].json_schema()
         _set_mcp_object_root(input_schema)
-        if tool is ToolName.SHELL_WRITE and "anyOf" in input_schema:
-            input_schema["oneOf"] = input_schema.pop("anyOf")
+        if tool is ToolName.SHELL_WRITE:
+            input_schema = _flatten_shell_write_input_schema(input_schema)
         properties = cast(dict[str, dict[str, object]], input_schema.get("properties", {}))
         configured_defaults = cast(dict[str, object], _configured_payload(tool, {}, config))
         for key, default in configured_defaults.items():
