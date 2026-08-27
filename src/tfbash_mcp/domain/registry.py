@@ -20,6 +20,7 @@ from tfbash_mcp.domain.models import (
     CommandShell,
     Execution,
     ExecutionState,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellState,
     SystemClock,
@@ -56,6 +57,7 @@ class ShellRegistry:
         self._closing_executions: dict[str, Execution] = {}
         self._next_shell_sequence = 1
         self._next_exec_sequence = 1
+        self._overview_change_signal = ChangeSignal()
         self._lock = RLock()
 
     def create_shell(self, *, cwd: str) -> CommandShell:
@@ -63,8 +65,14 @@ class ShellRegistry:
             if len(self._shells) >= self._max_shells:
                 raise CapacityExceeded("maximum command shell count reached")
             shell_id = self._new_identifier("shell")
-            shell = CommandShell(shell_id=shell_id, cwd=cwd, clock=self._clock)
+            shell = CommandShell(
+                shell_id=shell_id,
+                cwd=cwd,
+                clock=self._clock,
+                overview_change_signal=self._overview_change_signal,
+            )
             self._shells[shell_id] = shell
+            self._overview_change_signal.notify()
             return shell
 
     def get_shell(self, shell_id: str) -> CommandShell:
@@ -90,6 +98,7 @@ class ShellRegistry:
                 max_output_bytes=max_output_bytes,
                 clock=self._clock,
                 change_signal=change_signal,
+                overview_change_signal=self._overview_change_signal,
             )
             shell.start_execution(execution)
             return execution
@@ -178,10 +187,43 @@ class ShellRegistry:
             ]
             for exec_id in closing_ids:
                 del self._closing_executions[exec_id]
+            self._overview_change_signal.notify()
 
     def snapshots(self) -> tuple[ShellSnapshot, ...]:
         with self._lock:
             return tuple(shell.snapshot() for shell in self._shells.values())
+
+    def overview_snapshots(
+        self,
+        *,
+        max_output_characters: int,
+    ) -> tuple[ShellOverviewSnapshot, ...]:
+        if max_output_characters < 1:
+            raise ValueError("max_output_characters must be positive")
+        with self._lock:
+            self._prune_completed()
+            latest_completed: dict[str, Execution] = {}
+            for execution in self._completed.values():
+                latest_completed[execution.shell_id] = execution
+            result: list[ShellOverviewSnapshot] = []
+            for shell in self._shells.values():
+                selected_execution = shell.active_execution or latest_completed.get(shell.shell_id)
+                result.append(
+                    ShellOverviewSnapshot(
+                        shell=shell.snapshot(),
+                        execution=(
+                            selected_execution.overview_snapshot(
+                                max_output_characters=max_output_characters
+                            )
+                            if selected_execution is not None
+                            else None
+                        ),
+                    )
+                )
+            return tuple(result)
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return self._overview_change_signal.subscribe(listener)
 
     def prune_completed(self) -> tuple[str, ...]:
         with self._lock:
@@ -201,6 +243,8 @@ class ShellRegistry:
         while len(self._completed) > self._max_retained_executions:
             exec_id, _ = self._completed.popitem(last=False)
             removed.append(exec_id)
+        if removed:
+            self._overview_change_signal.notify()
         return tuple(removed)
 
     def _new_identifier(self, prefix: str) -> str:

@@ -7,18 +7,26 @@ import os
 import platform
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from threading import Event, Lock
+from typing import Any, Protocol, cast
 
 import anyio
 from mcp import types
-from mcp.server.lowlevel import Server
+from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import McpError
+from pydantic import AnyUrl
 
 from tfbash_mcp import __version__
 from tfbash_mcp.domain import CommandShellManager, ManagerConfig, WorkerConfig
-from tfbash_mcp.mcp_adapter import ShellToolService, ToolConcurrencyLimits
+from tfbash_mcp.mcp_adapter import (
+    SHELL_OVERVIEW_URI,
+    ShellToolService,
+    ToolConcurrencyLimits,
+)
 from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_contract_schemas
 from tfbash_mcp.runtime import (
     BashDialect,
@@ -43,6 +51,102 @@ from tfbash_mcp.runtime import (
 # Inert descriptor retained for import-time discovery. ``main`` builds the
 # configured process instance only after CLI and host validation succeed.
 server = Server("tfbash-mcp", version=__version__)
+
+_OVERVIEW_NOTIFICATION_DEBOUNCE_SECONDS = 0.1
+_TOOL_TAGS: dict[ToolName, tuple[str, ...]] = {
+    ToolName.SHELL_OPEN: ("BuildIn", "Create"),
+    ToolName.SHELL_EXEC: ("BuildIn", "Create", "Read", "Update", "Delete"),
+    ToolName.SHELL_READ: ("BuildIn", "Read"),
+    ToolName.SHELL_WRITE: ("BuildIn", "Create", "Read", "Update", "Delete"),
+    ToolName.SHELL_SIGNAL: ("BuildIn", "Update"),
+    ToolName.SHELL_LIST: ("BuildIn", "Read"),
+    ToolName.SHELL_CLOSE: ("BuildIn", "Delete"),
+}
+
+
+class _ResourceUpdateSession(Protocol):
+    async def send_resource_updated(self, uri: AnyUrl) -> None: ...
+
+
+class _ShellOverviewServer(Server[ShellToolService, object]):
+    """Low-level Server with the subscription capability required by Desktop."""
+
+    def get_capabilities(
+        self,
+        notification_options: NotificationOptions,
+        experimental_capabilities: dict[str, dict[str, Any]],
+    ) -> types.ServerCapabilities:
+        capabilities = super().get_capabilities(
+            notification_options,
+            experimental_capabilities,
+        )
+        resources = capabilities.resources
+        if resources is None:
+            return capabilities
+        return capabilities.model_copy(
+            update={
+                "resources": types.ResourcesCapability(
+                    subscribe=True,
+                    listChanged=resources.listChanged,
+                )
+            }
+        )
+
+
+class _OverviewSubscriptionHub:
+    """Bridge synchronous Domain events to subscribed async MCP sessions."""
+
+    def __init__(self) -> None:
+        self._changed = Event()
+        self._stopped = Event()
+        self._sessions: dict[int, _ResourceUpdateSession] = {}
+        self._lock = Lock()
+        self._unsubscribe_changes: Callable[[], None] | None = None
+
+    def connect(self, service: ShellToolService) -> None:
+        if self._unsubscribe_changes is not None:
+            raise RuntimeError("overview subscription hub is already connected")
+        self._stopped.clear()
+        self._changed.clear()
+        self._unsubscribe_changes = service.subscribe_overview_changes(self._changed.set)
+
+    def subscribe(self, session: _ResourceUpdateSession) -> None:
+        with self._lock:
+            self._sessions[id(session)] = session
+
+    def unsubscribe(self, session: _ResourceUpdateSession) -> None:
+        with self._lock:
+            self._sessions.pop(id(session), None)
+
+    def stop(self) -> None:
+        if self._unsubscribe_changes is not None:
+            self._unsubscribe_changes()
+            self._unsubscribe_changes = None
+        with self._lock:
+            self._sessions.clear()
+        self._stopped.set()
+        self._changed.set()
+
+    async def run(self) -> None:
+        resource_uri = AnyUrl(SHELL_OVERVIEW_URI)
+        while True:
+            await anyio.to_thread.run_sync(self._changed.wait)
+            self._changed.clear()
+            if self._stopped.is_set():
+                return
+            await anyio.sleep(_OVERVIEW_NOTIFICATION_DEBOUNCE_SECONDS)
+            # All events observed during the debounce window are represented by the
+            # latest Resource contents and therefore need only one notification.
+            self._changed.clear()
+            if self._stopped.is_set():
+                return
+            with self._lock:
+                sessions = tuple(self._sessions.values())
+            for session in sessions:
+                try:
+                    await session.send_resource_updated(resource_uri)
+                except Exception:
+                    self.unsubscribe(session)
 
 
 def _positive_integer(value: str) -> int:
@@ -203,11 +307,18 @@ def create_server(service: ShellToolService) -> Server[ShellToolService, object]
 
     tool_limiters = _create_tool_limiters(service)
     shutdown_limiter = anyio.CapacityLimiter(1)
+    overview_hub = _OverviewSubscriptionHub()
 
     @asynccontextmanager
     async def lifespan(_: Server[ShellToolService, object]) -> AsyncIterator[ShellToolService]:
+        overview_hub.connect(service)
         try:
-            yield service
+            async with anyio.create_task_group() as notifications:
+                notifications.start_soon(overview_hub.run)
+                try:
+                    yield service
+                finally:
+                    overview_hub.stop()
         finally:
             with anyio.CancelScope(shield=True):
                 await anyio.to_thread.run_sync(
@@ -215,7 +326,7 @@ def create_server(service: ShellToolService) -> Server[ShellToolService, object]
                     limiter=shutdown_limiter,
                 )
 
-    configured = Server[ShellToolService, object](
+    configured = _ShellOverviewServer(
         "tfbash-mcp",
         version=__version__,
         instructions=service.instructions,
@@ -236,7 +347,8 @@ def create_server(service: ShellToolService) -> Server[ShellToolService, object]
                 _meta={
                     "tfbash-mcp/errorSchema": cast(
                         dict[str, Any], contracts[tool.value]["errorSchema"]
-                    )
+                    ),
+                    "a2c_tool_meta": {"tags": list(_TOOL_TAGS[tool])},
                 },
             )
             for tool in ToolName
@@ -246,7 +358,53 @@ def create_server(service: ShellToolService) -> Server[ShellToolService, object]
     async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolResult:
         return await _run_tool_call(service, name, arguments, tool_limiters)
 
+    @configured.list_resources()  # type: ignore[no-untyped-call,misc]
+    async def list_resources() -> list[types.Resource]:
+        return [
+            types.Resource(
+                uri=AnyUrl(SHELL_OVERVIEW_URI),
+                name="Shell Overview",
+                description="Current Shell states and recent execution output.",
+                mimeType="text/markdown",
+                annotations=types.Annotations(
+                    priority=0.8,
+                    audience=["assistant"],
+                ),
+                _meta={"fullscreen": False},
+            )
+        ]
+
+    @configured.read_resource()  # type: ignore[no-untyped-call,misc]
+    async def read_resource(uri: AnyUrl) -> list[ReadResourceContents]:
+        _require_overview_uri(uri)
+        return [
+            ReadResourceContents(
+                content=service.shell_overview_markdown(),
+                mime_type="text/markdown",
+            )
+        ]
+
+    @configured.subscribe_resource()  # type: ignore[no-untyped-call,misc]
+    async def subscribe_resource(uri: AnyUrl) -> None:
+        _require_overview_uri(uri)
+        overview_hub.subscribe(configured.request_context.session)
+
+    @configured.unsubscribe_resource()  # type: ignore[no-untyped-call,misc]
+    async def unsubscribe_resource(uri: AnyUrl) -> None:
+        _require_overview_uri(uri)
+        overview_hub.unsubscribe(configured.request_context.session)
+
     return configured
+
+
+def _require_overview_uri(uri: AnyUrl) -> None:
+    if str(uri) != SHELL_OVERVIEW_URI:
+        raise McpError(
+            types.ErrorData(
+                code=types.INVALID_PARAMS,
+                message="Unknown Resource URI.",
+            )
+        )
 
 
 def _create_tool_limiters(

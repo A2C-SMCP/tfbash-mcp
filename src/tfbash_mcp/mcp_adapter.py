@@ -6,6 +6,8 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from html import escape
 from typing import Protocol, cast
 
 from mcp import types
@@ -20,6 +22,7 @@ from tfbash_mcp.domain import (
     ShellBusy,
     ShellClosing,
     ShellNotFound,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellUnavailable,
 )
@@ -58,6 +61,9 @@ from tfbash_mcp.runtime import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+SHELL_OVERVIEW_URI = "window://io.github.a2c-smcp.tfbash/shell-overview"
+SHELL_OVERVIEW_OUTPUT_CHARACTERS = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +118,14 @@ class ShellManager(Protocol):
     def close_shell(self, shell_id: str) -> bool: ...
 
     def snapshots(self) -> tuple[ShellSnapshot, ...]: ...
+
+    def overview_snapshots(
+        self,
+        *,
+        max_output_characters: int,
+    ) -> tuple[ShellOverviewSnapshot, ...]: ...
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]: ...
 
     def shutdown(self) -> None: ...
 
@@ -186,6 +200,15 @@ class ShellToolService:
 
     def shutdown(self) -> None:
         self._manager.shutdown()
+
+    def shell_overview_markdown(self) -> str:
+        snapshots = self._manager.overview_snapshots(
+            max_output_characters=SHELL_OVERVIEW_OUTPUT_CHARACTERS,
+        )
+        return _overview_markdown(self._agent_context.diagnostics(), snapshots)
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return self._manager.subscribe_overview_changes(listener)
 
     def _dispatch(
         self,
@@ -391,3 +414,88 @@ def _plain_error_result(message: str) -> types.CallToolResult:
 
 def _json_text(value: dict[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _overview_markdown(
+    context: dict[str, object],
+    snapshots: tuple[ShellOverviewSnapshot, ...],
+) -> str:
+    runtime = cast(dict[str, object], context["runtime"])
+    host = cast(dict[str, object], context["host"])
+    lines = [
+        "# Shell Overview",
+        "",
+        f"- Platform: {_inline(runtime['platform'])}",
+        f"- Dialect: {_inline(runtime['dialect'])}",
+        f"- Workspace: {_inline(host['workspace_root'])}",
+        f"- Shells: {len(snapshots)}",
+        "",
+    ]
+    if not snapshots:
+        lines.append("No active Shells.")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "| Shell ID | Status | CWD | Created | Execution ID | "
+            "Execution status | Exit code | Duration |",
+            "|---|---|---|---|---|---|---:|---:|",
+        ]
+    )
+    for snapshot in snapshots:
+        shell = snapshot.shell
+        execution = snapshot.execution
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _inline(shell.shell_id),
+                    shell.status.value,
+                    _inline(shell.last_known_cwd),
+                    _format_created_at(shell.created_at_ms),
+                    _inline(execution.exec_id if execution is not None else None),
+                    execution.status.value if execution is not None else "—",
+                    (
+                        str(execution.exit_code)
+                        if execution and execution.exit_code is not None
+                        else "—"
+                    ),
+                    (
+                        f"{execution.duration_ms} ms"
+                        if execution and execution.duration_ms is not None
+                        else "—"
+                    ),
+                )
+            )
+            + " |"
+        )
+
+    for snapshot in snapshots:
+        execution = snapshot.execution
+        lines.extend(["", f"## {_heading(snapshot.shell.shell_id)} — recent output", ""])
+        if execution is None:
+            lines.append("No retained execution.")
+            continue
+        if execution.output_truncated:
+            lines.extend(["_Earlier output was truncated._", ""])
+        if execution.output:
+            lines.append(f"<pre>{escape(execution.output)}</pre>")
+        else:
+            lines.append("No output captured.")
+    return "\n".join(lines)
+
+
+def _inline(value: object | None) -> str:
+    if value is None:
+        return "—"
+    escaped = escape(str(value)).replace("|", "&#124;")
+    return f"<code>{escaped}</code>"
+
+
+def _heading(value: str) -> str:
+    return escape(value)
+
+
+def _format_created_at(milliseconds: int) -> str:
+    created = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+    return created.isoformat(timespec="milliseconds").replace("+00:00", "Z")

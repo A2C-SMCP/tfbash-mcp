@@ -82,6 +82,22 @@ def test_execution_finalizing_is_publicly_running_but_rejects_input() -> None:
     assert change_signal.wait_for_change(4, timeout_seconds=0) == 4
 
 
+def test_change_signal_listener_failure_does_not_block_other_observers() -> None:
+    signal = ChangeSignal()
+    observed: list[str] = []
+
+    def fail() -> None:
+        raise RuntimeError("observer failed")
+
+    signal.subscribe(fail)
+    signal.subscribe(lambda: observed.append("changed"))
+
+    signal.notify()
+
+    assert signal.generation == 1
+    assert observed == ["changed"]
+
+
 def test_terminal_completion_is_first_writer_wins_cas() -> None:
     clock = FakeClock()
     execution = _execution(clock)

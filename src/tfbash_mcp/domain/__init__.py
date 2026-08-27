@@ -18,13 +18,15 @@ from tfbash_mcp.domain.models import (
     Clock,
     CommandShell,
     Execution,
+    ExecutionOverviewSnapshot,
     ExecutionSnapshot,
     ExecutionState,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellState,
     SystemClock,
 )
-from tfbash_mcp.domain.output import OutputSlice, Utf8OutputBuffer
+from tfbash_mcp.domain.output import OutputSlice, OutputTail, Utf8OutputBuffer
 from tfbash_mcp.domain.registry import IdFactory, ShellRegistry
 from tfbash_mcp.domain.worker import ShellWorker, WorkerConfig
 
@@ -38,6 +40,7 @@ __all__ = [
     "Execution",
     "ExecutionNotActive",
     "ExecutionNotFound",
+    "ExecutionOverviewSnapshot",
     "ExecutionSnapshot",
     "ExecutionState",
     "IdFactory",
@@ -45,9 +48,11 @@ __all__ = [
     "InvalidTransition",
     "ManagerConfig",
     "OutputSlice",
+    "OutputTail",
     "ShellBusy",
     "ShellClosing",
     "ShellNotFound",
+    "ShellOverviewSnapshot",
     "ShellRegistry",
     "ShellSnapshot",
     "ShellState",
