@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 from typing import Any, cast
 
 import anyio
 import pytest
+from pydantic import AnyUrl
 
 import tfbash_mcp.server as server_module
 from tfbash_mcp.domain import (
@@ -32,6 +34,7 @@ from tfbash_mcp.server import (
     _build_posix_runtime,
     _build_windows_runtime,
     _create_tool_limiters,
+    _OverviewSubscriptionHub,
     _probe_shell_version,
     _redact_sensitive_schema_defaults,
     _run_tool_call,
@@ -39,6 +42,50 @@ from tfbash_mcp.server import (
     build_parser,
     build_service,
 )
+
+
+def test_overview_subscription_hub_coalesces_burst_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server_module, "_OVERVIEW_NOTIFICATION_DEBOUNCE_SECONDS", 0.01)
+
+    class FakeOverviewService:
+        def __init__(self) -> None:
+            self.listeners: set[Callable[[], None]] = set()
+
+        def subscribe_overview_changes(
+            self,
+            listener: Callable[[], None],
+        ) -> Callable[[], None]:
+            self.listeners.add(listener)
+            return lambda: self.listeners.discard(listener)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.updates: list[str] = []
+
+        async def send_resource_updated(self, uri: AnyUrl) -> None:
+            self.updates.append(str(uri))
+
+    async def scenario() -> None:
+        service = FakeOverviewService()
+        session = FakeSession()
+        hub = _OverviewSubscriptionHub()
+        hub.connect(cast(Any, service))
+        hub.subscribe(session)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(hub.run)
+            for _ in range(10):
+                for listener in tuple(service.listeners):
+                    listener()
+            await anyio.sleep(0.05)
+            assert session.updates == ["window://io.github.a2c-smcp.tfbash/shell-overview"]
+            hub.stop()
+
+        assert not service.listeners
+
+    anyio.run(scenario)
 
 
 def test_cli_accepts_only_stdio_and_positive_resource_limits() -> None:

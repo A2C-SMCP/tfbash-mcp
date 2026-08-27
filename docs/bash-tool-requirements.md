@@ -197,6 +197,27 @@ V1 只暴露一个 Shell 资源模型，共七个工具：
 
 七个工具名、字段、响应 union 和 Shell/Execution 领域模型均已在 Windows Phase 0 实验后冻结。实验确认语义化的控制、退出码、路径和 runtime context 字段可跨两个 Runtime Profile 兑现；任意二进制 stdin 与 EOF control 未通过同义性门槛，因此未进入 V1 公共合同。
 
+除七个工具外，Server 暴露一个固定的 A2C-SMCP Desktop Window Resource：
+`window://io.github.a2c-smcp.tfbash/shell-overview`。`resources/list` 将其声明为面向
+assistant、priority 0.8、非 fullscreen 的 `text/markdown` 资源；`resources/read` 返回
+当前 Registry 一致性快照。每个 Shell 展示自身字段，并优先展示活动 Execution；空闲时展示
+仍在既有 retention 内的最近完成 Execution。输出仅取末尾 500 个 Unicode 字符，超限明确
+标记，不扩大 buffer 或 retention。Server 必须声明 `resources.subscribe=true`，Shell 生命周期、
+Execution 状态与输出变化通过专用事件信号触发合并后的 `ResourceUpdatedNotification`，不得
+使用定时轮询。关闭的 Shell 与已淘汰 Execution 不进入概览，`shell_list` 合同保持不变。
+
+工具的 Server 声明层 `_meta.a2c_tool_meta.tags` 固定如下，并保留其它 `_meta`：
+
+| 工具 | tags |
+|---|---|
+| `shell_open` | `BuildIn, Create` |
+| `shell_exec` | `BuildIn, Create, Read, Update, Delete` |
+| `shell_read` | `BuildIn, Read` |
+| `shell_write` | `BuildIn, Create, Read, Update, Delete` |
+| `shell_signal` | `BuildIn, Update` |
+| `shell_list` | `BuildIn, Read` |
+| `shell_close` | `BuildIn, Delete` |
+
 `shell_id` 标识持久执行环境；`exec_id` 标识该 Shell 中一次具体命令及其输出。一个 Shell 同时最多有一个活动 Execution，但可以保留多个尚未过期的已完成 Execution 供读取。
 
 #### 共同 schema 规则

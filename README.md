@@ -153,6 +153,13 @@ uv run tfbash-mcp \
   --workspace-root /absolute/path/to/workspace
 ```
 
+Server 同时暴露 `window://io.github.a2c-smcp.tfbash/shell-overview` Markdown Resource，
+供 A2C-SMCP Desktop 展示当前所有 Shell 的 ID、状态、cwd、最近 Execution 状态和末尾
+500 个 Unicode 字符输出。该 Resource 支持订阅，并在 Shell 生命周期、Execution 状态或
+输出变化时通过事件驱动的 `ResourceUpdatedNotification` 刷新；它是上下文补充，不替代
+`shell_list`。七个工具还通过 `Tool._meta.a2c_tool_meta.tags` 声明 `BuildIn` 和对应 CRUD
+能力标签，Computer 的更高优先级配置仍可按 A2C-SMCP v0.4.0 合并规则覆盖。
+
 运行参数可通过 `uv run tfbash-mcp --help` 查看。配置优先级为单次 `shell_open` 参数、
 进程级 CLI/HostConfig、Runtime Profile 默认值。继承的环境变量只用于启动 Shell；
 `shell_list` 仅返回 Runtime、Host 和 Shell 状态，不返回环境变量名、值、启动命令或其他密钥材料。

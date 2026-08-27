@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mcp import types
 
 from tfbash_mcp.domain import (
+    ExecutionOverviewSnapshot,
     ExecutionSnapshot,
     ExecutionState,
     ShellBusy,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellState,
     ShellUnavailable,
 )
-from tfbash_mcp.mcp_adapter import ShellToolService
+from tfbash_mcp.mcp_adapter import SHELL_OVERVIEW_OUTPUT_CHARACTERS, ShellToolService
 from tfbash_mcp.protocol import PlatformName, ProtocolConfig
 from tfbash_mcp.runtime import (
     BashDialect,
@@ -36,6 +39,8 @@ class FakeManager:
     exec_error: Exception | None = None
     close_error: Exception | None = None
     shutdown_calls: int = 0
+    overview_items: tuple[ShellOverviewSnapshot, ...] = ()
+    overview_max_characters: int | None = None
 
     def open_shell(self, request: ShellStartRequest) -> ShellSnapshot:
         self.starts.append(request)
@@ -108,16 +113,35 @@ class FakeManager:
     def snapshots(self) -> tuple[ShellSnapshot, ...]:
         return (ShellSnapshot("shell_1", ShellState.READY, "/workspace", None, 100),)
 
+    def overview_snapshots(
+        self,
+        *,
+        max_output_characters: int,
+    ) -> tuple[ShellOverviewSnapshot, ...]:
+        self.overview_max_characters = max_output_characters
+        return self.overview_items
+
+    def subscribe_overview_changes(
+        self,
+        listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        del listener
+        return lambda: None
+
     def shutdown(self) -> None:
         self.shutdown_calls += 1
 
 
-def make_service(manager: FakeManager) -> ShellToolService:
+def make_service(
+    manager: FakeManager,
+    *,
+    workspace_root: str = "/workspace",
+) -> ShellToolService:
     host = create_host_config(
         host_profile=HostProfile.STANDALONE,
         runtime_selection=RuntimeSelection.POSIX_BASH,
         operating_system="linux",
-        process_cwd="/workspace",
+        process_cwd=workspace_root,
         inherited_environment={"TFBASH_TEST_SECRET": "must-not-leak"},
         startup_command="printf configured",
         directory_exists=lambda _: True,
@@ -135,7 +159,7 @@ def make_service(manager: FakeManager) -> ShellToolService:
     )
     config = ProtocolConfig(
         platform=PlatformName.LINUX,
-        default_cwd="/workspace",
+        default_cwd=workspace_root,
         shell="/bin/bash",
         startup_command="printf configured",
     )
@@ -223,6 +247,54 @@ def test_shell_list_exposes_host_context_but_not_inherited_environment() -> None
         "workspace_root": "/workspace",
     }
     assert "must-not-leak" not in _text(result)
+
+
+def test_shell_overview_renders_context_status_and_unicode_tail_as_markdown() -> None:
+    manager = FakeManager(
+        overview_items=(
+            ShellOverviewSnapshot(
+                shell=ShellSnapshot(
+                    "shell_1",
+                    ShellState.READY,
+                    "/workspace/a|b\nnext",
+                    None,
+                    1_700_000_000_000,
+                ),
+                execution=ExecutionOverviewSnapshot(
+                    exec_id="exec_1",
+                    status=ExecutionState.EXITED,
+                    exit_code=0,
+                    duration_ms=12,
+                    output="尾部<ok>\n```",
+                    output_truncated=True,
+                ),
+            ),
+        )
+    )
+    service = make_service(manager, workspace_root="/workspace/a|b")
+
+    markdown = service.shell_overview_markdown()
+
+    assert manager.overview_max_characters == SHELL_OVERVIEW_OUTPUT_CHARACTERS == 500
+    assert "# Shell Overview" in markdown
+    assert "- Platform: `linux`" in markdown
+    assert "- Workspace: `/workspace/a|b`" in markdown
+    assert "`shell_1`" in markdown
+    assert "`/workspace/a\\|b\\nnext`" in markdown
+    assert "2023-11-14T22:13:20.000Z" in markdown
+    assert "Earlier output was truncated" in markdown
+    assert "````text\n尾部<ok>\n```\n````" in markdown
+    assert "<code>" not in markdown
+    assert "<pre>" not in markdown
+
+
+def test_empty_shell_overview_has_explicit_placeholder() -> None:
+    service = make_service(FakeManager())
+
+    markdown = service.shell_overview_markdown()
+
+    assert "- Shells: 0" in markdown
+    assert "No active Shells." in markdown
 
 
 def test_unknown_and_unexpected_failures_do_not_expose_exception_text() -> None:

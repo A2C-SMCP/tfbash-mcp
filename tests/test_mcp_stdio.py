@@ -9,8 +9,22 @@ from typing import Any, cast
 
 import anyio
 import pytest
-from mcp import ClientSession
+from mcp import ClientSession, types
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.shared.exceptions import McpError
+from pydantic import AnyUrl
+
+from tfbash_mcp.mcp_adapter import SHELL_OVERVIEW_URI
+
+EXPECTED_TOOL_TAGS = {
+    "shell_open": ["BuildIn", "Create"],
+    "shell_exec": ["BuildIn", "Create", "Read", "Update", "Delete"],
+    "shell_read": ["BuildIn", "Read"],
+    "shell_write": ["BuildIn", "Create", "Read", "Update", "Delete"],
+    "shell_signal": ["BuildIn", "Update"],
+    "shell_list": ["BuildIn", "Read"],
+    "shell_close": ["BuildIn", "Delete"],
+}
 
 
 async def _read_until_terminal(
@@ -91,6 +105,17 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
     server_arguments: list[str], expected_mode: str
 ) -> None:
     async def scenario() -> None:
+        resource_updates: list[str] = []
+        resource_updated = anyio.Event()
+
+        async def message_handler(message: Any) -> None:
+            if isinstance(message, types.ServerNotification) and isinstance(
+                message.root,
+                types.ResourceUpdatedNotification,
+            ):
+                resource_updates.append(str(message.root.params.uri))
+                resource_updated.set()
+
         runtime_arguments: list[str]
         if sys.platform == "win32":
             runtime_arguments = [
@@ -119,11 +144,17 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
         )
         async with (
             stdio_client(parameters) as (read_stream, write_stream),
-            ClientSession(read_stream, write_stream) as session,
+            ClientSession(
+                read_stream,
+                write_stream,
+                message_handler=message_handler,
+            ) as session,
         ):
             initialized = await session.initialize()
             assert initialized.instructions is not None
             assert f"{expected_dialect} dialect" in initialized.instructions
+            assert initialized.capabilities.resources is not None
+            assert initialized.capabilities.resources.subscribe is True
 
             listed = await session.list_tools()
             assert [tool.name for tool in listed.tools] == [
@@ -145,6 +176,10 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
                 tool.meta is not None and "tfbash-mcp/errorSchema" in tool.meta
                 for tool in listed.tools
             )
+            assert {
+                tool.name: cast(dict[str, Any], tool.meta)["a2c_tool_meta"]["tags"]
+                for tool in listed.tools
+            } == EXPECTED_TOOL_TAGS
             write_schema = next(
                 tool.inputSchema for tool in listed.tools if tool.name == "shell_write"
             )
@@ -153,6 +188,23 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             assert "oneOf" not in write_schema
             assert "data_base64" not in str(write_schema)
             assert "eof" not in str(write_schema)
+
+            resources = await session.list_resources()
+            assert len(resources.resources) == 1
+            overview_resource = resources.resources[0]
+            assert str(overview_resource.uri) == SHELL_OVERVIEW_URI
+            assert overview_resource.mimeType == "text/markdown"
+            assert overview_resource.annotations is not None
+            assert overview_resource.annotations.audience == ["assistant"]
+            assert overview_resource.annotations.priority == 0.8
+            assert overview_resource.meta == {"fullscreen": False}
+            empty_overview = await session.read_resource(overview_resource.uri)
+            empty_content = empty_overview.contents[0]
+            assert isinstance(empty_content, types.TextResourceContents)
+            assert "No active Shells." in empty_content.text
+            with pytest.raises(McpError):
+                await session.read_resource(AnyUrl("window://io.github.a2c-smcp.tfbash/unknown"))
+            await session.subscribe_resource(overview_resource.uri)
 
             context_result = await session.call_tool("shell_list", {})
             context = cast(dict[str, Any], context_result.structuredContent)
@@ -164,6 +216,9 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             opened = await session.call_tool("shell_open", {})
             opened_content = cast(dict[str, Any], opened.structuredContent)
             shell_id = cast(str, opened_content["shell_id"])
+            with anyio.fail_after(2):
+                await resource_updated.wait()
+            assert resource_updates[-1] == SHELL_OVERVIEW_URI
             executed = await session.call_tool(
                 "shell_exec",
                 {"shell_id": shell_id, "command": command, "yield_ms": 2_000},
@@ -177,6 +232,12 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
                 )
             assert execution["status"] == "exited"
             assert cast(str, execution["output"]).strip() == "mcp-e2e"
+
+            overview = await session.read_resource(overview_resource.uri)
+            overview_content = overview.contents[0]
+            assert isinstance(overview_content, types.TextResourceContents)
+            assert shell_id in overview_content.text
+            assert "mcp-e2e" in overview_content.text
 
             waiting = await session.call_tool(
                 "shell_exec",
@@ -204,9 +265,19 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             )
             assert "stdin:form-ready" in cast(str, after_write["output"])
 
+            await anyio.sleep(0.3)
+            await session.unsubscribe_resource(overview_resource.uri)
+            update_count = len(resource_updates)
+
             closed = await session.call_tool("shell_close", {"shell_id": shell_id})
             closed_content = cast(dict[str, Any], closed.structuredContent)
             assert closed_content["cleanup_complete"] is True
+            await anyio.sleep(0.2)
+            assert len(resource_updates) == update_count
+            closed_overview = await session.read_resource(overview_resource.uri)
+            closed_content_item = closed_overview.contents[0]
+            assert isinstance(closed_content_item, types.TextResourceContents)
+            assert "No active Shells." in closed_content_item.text
 
     anyio.run(scenario)
 

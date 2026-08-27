@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 
@@ -13,6 +14,7 @@ from tfbash_mcp.domain.models import (
     Execution,
     ExecutionSnapshot,
     ExecutionState,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellState,
     SystemClock,
@@ -348,6 +350,18 @@ class CommandShellManager:
 
     def snapshots(self) -> tuple[ShellSnapshot, ...]:
         return self._registry.snapshots()
+
+    def overview_snapshots(
+        self,
+        *,
+        max_output_characters: int,
+    ) -> tuple[ShellOverviewSnapshot, ...]:
+        return self._registry.overview_snapshots(
+            max_output_characters=max_output_characters,
+        )
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return self._registry.subscribe_overview_changes(listener)
 
     def shutdown(self) -> None:
         shutdown_deadline = time.monotonic() + self._config.worker.cleanup_deadline_ms / 1000

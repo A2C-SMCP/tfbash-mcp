@@ -157,6 +157,62 @@ def test_completed_retention_applies_ttl_before_global_count() -> None:
         registry.get_execution(second.shell_id, two.exec_id)
 
 
+def test_overview_prefers_active_then_latest_retained_execution_tail() -> None:
+    clock = FakeClock()
+    registry = _registry(clock, max_retained=3, retention_ms=100)
+    shell = registry.create_shell(cwd="/one")
+    first = registry.start_execution(shell.shell_id, max_output_bytes=64)
+    first.append_output(b"first-output")
+    _finish(registry, shell.shell_id, first.exec_id)
+    second = registry.start_execution(shell.shell_id, max_output_bytes=64)
+    second.append_output("active-界🙂-tail".encode())
+
+    active = registry.overview_snapshots(max_output_characters=6)[0]
+    assert active.shell.active_exec_id == second.exec_id
+    assert active.execution is not None
+    assert active.execution.exec_id == second.exec_id
+    assert active.execution.output == "active-界🙂-tail"[-6:]
+    assert active.execution.output_truncated is True
+
+    _finish(registry, shell.shell_id, second.exec_id)
+    completed = registry.overview_snapshots(max_output_characters=500)[0]
+    assert completed.shell.active_exec_id is None
+    assert completed.execution is not None
+    assert completed.execution.exec_id == second.exec_id
+    assert completed.execution.output == "active-界🙂-tail"
+
+    clock.advance(100)
+    expired = registry.overview_snapshots(max_output_characters=500)[0]
+    assert expired.execution is None
+
+
+def test_overview_change_subscription_covers_lifecycle_state_and_output() -> None:
+    registry = _registry(FakeClock())
+    notifications = 0
+
+    def changed() -> None:
+        nonlocal notifications
+        notifications += 1
+
+    unsubscribe = registry.subscribe_overview_changes(changed)
+    shell = registry.create_shell(cwd="/one")
+    after_create = notifications
+    execution = registry.start_execution(shell.shell_id, max_output_bytes=64)
+    after_start = notifications
+    execution.append_output(b"output")
+    after_output = notifications
+    _finish(registry, shell.shell_id, execution.exec_id)
+    after_finish = notifications
+    registry.begin_close(shell.shell_id)
+    registry.remove_closed(shell.shell_id)
+
+    assert 0 < after_create < after_start < after_output < after_finish < notifications
+    unsubscribe()
+    after_unsubscribe = notifications
+    registry.create_shell(cwd="/two")
+    assert notifications == after_unsubscribe
+
+
 def test_close_cancellation_wins_and_late_completion_is_noop() -> None:
     clock = FakeClock()
     registry = _registry(clock)
