@@ -217,10 +217,12 @@ class BashProtocol(DialectProtocol):
         begin = begin_marker[1:-1].decode("ascii")
         end = result_prefix[1:].decode("ascii")
         decoder = f'"${self._base64_variable}"'
+        exit_code_variable = f"__tfbash_rc_{command_token}"
+        command_with_exit_capture = f"{command}\n{exit_code_variable}=$?"
         script = (
             f"printf '\\036{begin}\\037'; "
-            f"{_encoded_eval(command, decoder)}; "
-            "__tfbash_rc=$?; "
+            f"{exit_code_variable}=2; "
+            f"{_encoded_eval(command_with_exit_capture, decoder)}; "
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
             "__tfbash_cwd=$(pwd -P); "
@@ -229,7 +231,8 @@ class BashProtocol(DialectProtocol):
             "__tfbash_cwd_b64=${__tfbash_cwd_b64//$'\\n'/}; "
             "__tfbash_cwd_b64=${__tfbash_cwd_b64//$'\\r'/}; "
             f"printf '\\036{end}%d:%s\\037' "
-            '"$__tfbash_rc" "$__tfbash_cwd_b64"'
+            f'"${{{exit_code_variable}}}" "$__tfbash_cwd_b64"; '
+            f"unset {exit_code_variable}"
         )
         return CommandFrame(correlation_id=correlation_id, input_bytes=script.encode() + b"\n")
 

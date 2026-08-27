@@ -409,6 +409,19 @@ def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
             assert first_content["exit_code"] == 0
             assert first_content["output"] == "posix-host-ready"
 
+            malformed = await session.call_tool(
+                "shell_exec",
+                {
+                    "shell_id": shell_id,
+                    "command": "while true; do echo X sleep 1 done",
+                    "yield_ms": 5_000,
+                },
+            )
+            malformed_content = cast(dict[str, Any], malformed.structuredContent)
+            assert malformed_content["status"] == "exited"
+            assert malformed_content["exit_code"] == 2
+            assert "syntax error" in cast(str, malformed_content["output"])
+
             # The streaming parser retains a possible result-marker suffix between reads.
             control_ready = "control-ready-" + "x" * 128
             running = await session.call_tool(

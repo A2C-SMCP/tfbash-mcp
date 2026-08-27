@@ -429,7 +429,12 @@ def test_command_wrapper_preserves_multiline_and_heredoc_bytes() -> None:
     )
 
     assert match is not None
-    assert base64.b64decode(match.group(1)).decode() == command
+    command_token = frame.correlation_id.removeprefix("bash_")
+    exit_code_variable = f"__tfbash_rc_{command_token}"
+    assert base64.b64decode(match.group(1)).decode() == (f"{command}\n{exit_code_variable}=$?")
+    assert f"{exit_code_variable}=2; ".encode() in frame.input_bytes
+    assert f'"${{{exit_code_variable}}}"'.encode() in frame.input_bytes
+    assert f"unset {exit_code_variable}".encode() in frame.input_bytes
     assert frame.input_bytes.count(b"\n") == 1
 
 
@@ -553,8 +558,41 @@ def test_real_bash_keeps_startup_cwd_env_multiline_and_exit_status(tmp_path: Pat
         output = b"".join(event.data for event in events if event.kind is DialectEventKind.OUTPUT)
         assert "你好🙂".encode() in output
         assert "/持久".encode() in output
-        assert completed.exit_code != 0
+        assert completed.exit_code == 1
         assert completed.cwd == str(subdirectory)
+    finally:
+        child.close(force=True)
+
+
+@pytest.mark.skipif(not Path("/bin/bash").exists(), reason="Bash is unavailable")
+def test_real_bash_syntax_error_never_reports_success(tmp_path: Path) -> None:
+    dialect = BashDialect(token_factory=_token_factory("A" * 32, "B" * 32))
+    plan = dialect.prepare_session(
+        ShellStartRequest("/bin/bash", str(tmp_path), dict(os.environ), None)
+    )
+    protocol = cast(BashProtocol, plan.protocol)
+    child = pexpect.spawn(
+        plan.launch.spawn.executable,
+        list(plan.launch.spawn.arguments),
+        cwd=plan.launch.spawn.cwd,
+        env=dict(plan.launch.spawn.environment),
+        encoding=None,
+        echo=False,
+        timeout=8,
+    )
+    try:
+        _read_until(child, protocol, DialectEventKind.BOOTSTRAP_REQUIRED)
+        child.send(plan.launch.initial_input)
+        _read_until(child, protocol, DialectEventKind.READY)
+
+        malformed = protocol.wrap_command("while true; do echo X sleep 1 done")
+        child.send(malformed.input_bytes)
+        events, completed = _read_until(child, protocol, DialectEventKind.COMMAND_COMPLETE)
+        output = b"".join(event.data for event in events if event.kind is DialectEventKind.OUTPUT)
+
+        assert b"syntax error" in output
+        assert completed.exit_code == 2
+        assert completed.cwd == str(tmp_path)
     finally:
         child.close(force=True)
 
