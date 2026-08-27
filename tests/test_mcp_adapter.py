@@ -133,12 +133,16 @@ class FakeManager:
         self.shutdown_calls += 1
 
 
-def make_service(manager: FakeManager) -> ShellToolService:
+def make_service(
+    manager: FakeManager,
+    *,
+    workspace_root: str = "/workspace",
+) -> ShellToolService:
     host = create_host_config(
         host_profile=HostProfile.STANDALONE,
         runtime_selection=RuntimeSelection.POSIX_BASH,
         operating_system="linux",
-        process_cwd="/workspace",
+        process_cwd=workspace_root,
         inherited_environment={"TFBASH_TEST_SECRET": "must-not-leak"},
         startup_command="printf configured",
         environment_summary=EnvironmentSummary(),
@@ -157,7 +161,7 @@ def make_service(manager: FakeManager) -> ShellToolService:
     )
     config = ProtocolConfig(
         platform=PlatformName.LINUX,
-        default_cwd="/workspace",
+        default_cwd=workspace_root,
         shell="/bin/bash",
         startup_command="printf configured",
     )
@@ -251,7 +255,7 @@ def test_shell_overview_renders_context_status_and_unicode_tail_as_markdown() ->
                 shell=ShellSnapshot(
                     "shell_1",
                     ShellState.READY,
-                    "/workspace/a|b",
+                    "/workspace/a|b\nnext",
                     None,
                     1_700_000_000_000,
                 ),
@@ -260,23 +264,27 @@ def test_shell_overview_renders_context_status_and_unicode_tail_as_markdown() ->
                     status=ExecutionState.EXITED,
                     exit_code=0,
                     duration_ms=12,
-                    output="尾部<ok>",
+                    output="尾部<ok>\n```",
                     output_truncated=True,
                 ),
             ),
         )
     )
-    service = make_service(manager)
+    service = make_service(manager, workspace_root="/workspace/a|b")
 
     markdown = service.shell_overview_markdown()
 
     assert manager.overview_max_characters == SHELL_OVERVIEW_OUTPUT_CHARACTERS == 500
     assert "# Shell Overview" in markdown
-    assert "<code>shell_1</code>" in markdown
-    assert "<code>/workspace/a&#124;b</code>" in markdown
+    assert "- Platform: `linux`" in markdown
+    assert "- Workspace: `/workspace/a|b`" in markdown
+    assert "`shell_1`" in markdown
+    assert "`/workspace/a\\|b\\nnext`" in markdown
     assert "2023-11-14T22:13:20.000Z" in markdown
     assert "Earlier output was truncated" in markdown
-    assert "<pre>尾部&lt;ok&gt;</pre>" in markdown
+    assert "````text\n尾部<ok>\n```\n````" in markdown
+    assert "<code>" not in markdown
+    assert "<pre>" not in markdown
 
 
 def test_empty_shell_overview_has_explicit_placeholder() -> None:

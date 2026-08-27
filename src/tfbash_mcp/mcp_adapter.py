@@ -7,7 +7,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from html import escape
 from typing import Protocol, cast
 
 from mcp import types
@@ -449,11 +448,11 @@ def _overview_markdown(
             "| "
             + " | ".join(
                 (
-                    _inline(shell.shell_id),
+                    _table_inline(shell.shell_id),
                     shell.status.value,
-                    _inline(shell.last_known_cwd),
+                    _table_inline(shell.last_known_cwd),
                     _format_created_at(shell.created_at_ms),
-                    _inline(execution.exec_id if execution is not None else None),
+                    _table_inline(execution.exec_id if execution is not None else None),
                     execution.status.value if execution is not None else "—",
                     (
                         str(execution.exit_code)
@@ -472,14 +471,14 @@ def _overview_markdown(
 
     for snapshot in snapshots:
         execution = snapshot.execution
-        lines.extend(["", f"## {_heading(snapshot.shell.shell_id)} — recent output", ""])
+        lines.extend(["", f"## {_inline(snapshot.shell.shell_id)} — recent output", ""])
         if execution is None:
             lines.append("No retained execution.")
             continue
         if execution.output_truncated:
             lines.extend(["_Earlier output was truncated._", ""])
         if execution.output:
-            lines.append(f"<pre>{escape(execution.output)}</pre>")
+            lines.append(_code_block(execution.output))
         else:
             lines.append("No output captured.")
     return "\n".join(lines)
@@ -488,12 +487,55 @@ def _overview_markdown(
 def _inline(value: object | None) -> str:
     if value is None:
         return "—"
-    escaped = escape(str(value)).replace("|", "&#124;")
-    return f"<code>{escaped}</code>"
+    return _code_span(_visible_inline_text(str(value)))
 
 
-def _heading(value: str) -> str:
-    return escape(value)
+def _table_inline(value: object | None) -> str:
+    if value is None:
+        return "—"
+    text = _visible_inline_text(str(value)).replace("|", r"\|")
+    return _code_span(text)
+
+
+def _code_span(text: str) -> str:
+    delimiter = "`" * (_longest_run(text, "`") + 1)
+    if len(delimiter) == 1:
+        return f"{delimiter}{text}{delimiter}"
+    return f"{delimiter} {text} {delimiter}"
+
+
+def _visible_inline_text(value: str) -> str:
+    rendered: list[str] = []
+    for character in value:
+        codepoint = ord(character)
+        if character == "\r":
+            rendered.append(r"\r")
+        elif character == "\n":
+            rendered.append(r"\n")
+        elif character == "\t":
+            rendered.append(r"\t")
+        elif codepoint < 32 or codepoint == 127:
+            rendered.append(f"\\u{codepoint:04x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
+def _code_block(value: str) -> str:
+    fence = "`" * max(3, _longest_run(value, "`") + 1)
+    trailing_newline = "" if value.endswith("\n") else "\n"
+    return f"{fence}text\n{value}{trailing_newline}{fence}"
+
+
+def _longest_run(value: str, character: str) -> int:
+    longest = current = 0
+    for item in value:
+        if item == character:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
 
 
 def _format_created_at(milliseconds: int) -> str:
