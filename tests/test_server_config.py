@@ -50,6 +50,14 @@ def test_cli_accepts_only_stdio_and_positive_resource_limits() -> None:
         parser.parse_args(["--max-command-shells", "0"])
 
 
+def test_cli_has_no_language_specific_environment_metadata_options() -> None:
+    parser = build_parser()
+    destinations = {action.dest for action in parser._actions}
+
+    assert "environment_kind" not in destinations
+    assert "environment_name" not in destinations
+
+
 def test_cli_cross_option_deadlines_are_validated() -> None:
     parser = build_parser()
     too_short_close = parser.parse_args(

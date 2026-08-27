@@ -139,7 +139,7 @@ standalone MCP Client 或 IDE Host
 
 ### 4.1 Host Profile、workspace 与 Agent 感知
 
-`HostProfile` 与 `RuntimeProfile` 正交。`standalone` 和 `ide` 不产生两套 Server，也不改变 Shell 执行语义。Server 启动时把宿主提供的参数解析为一份进程内不可变的 `HostConfig`；它至少包含 `host_profile`、`workspace_root`、`default_cwd`、`runtime_profile`、默认 Shell、默认 startup command 和可安全展示的 environment summary。原始环境变量只用于创建子进程，不属于 Agent 可见合同。
+`HostProfile` 与 `RuntimeProfile` 正交。`standalone` 和 `ide` 不产生两套 Server，也不改变 Shell 执行语义。Server 启动时把宿主提供的参数解析为一份进程内不可变的 `HostConfig`；它至少包含 `host_profile`、`workspace_root`、`default_cwd`、`runtime_profile`、默认 Shell、默认 startup command 和供子进程继承的环境。原始环境变量只用于创建子进程，不属于 Agent 可见合同。
 
 | Host Profile | workspace 来源 | 宿主职责 | Server 不承担 |
 |---|---|---|---|
@@ -151,13 +151,13 @@ standalone MCP Client 或 IDE Host
 - 标准 Python venv 由 IDE/launcher 解析，优先通过 `VIRTUAL_ENV` 与预置后的 `PATH`/`Path` 注入 Server 进程，使新 Shell 直接继承；Server 不自行查找 `.venv`，也不以执行 `Activate.ps1` 作为 Windows 默认路径；
 - Conda、direnv 或自定义工具若不能只靠环境变量表达，可由宿主提供与当前 Runtime Profile 方言一致的 `startup_command`；该命令在初次 open 和自动重建时都必须执行，失败则本次 `shell_open`/rebuild 失败；
 - `shell_open` 显式字段逐字段覆盖 `HostConfig`，`HostConfig` 再覆盖 Runtime Profile 默认值。环境按“Server 继承环境 → 宿主注入 → `shell_open.env`”逐层合并；Windows 按大小写不敏感的 key 语义处理；
-- environment summary 只能由宿主显式声明 `kind`（`none|python-venv|conda|custom`）和可选的非敏感 `name`。Server 不从环境变量反推类型，也不向 Agent 回显环境变量值、startup command 或解释器绝对路径。
+- Server 不从环境变量推断语言、包管理器或虚拟环境类型，也不向 Agent 回显环境变量值、startup command 或解释器绝对路径。
 
 Agent 不得从 `tfbash-mcp` 名称、路径分隔符或 `TERM_PROGRAM` 猜测运行环境。Server 必须通过互相补强的稳定渠道提供 runtime context：
 
 1. MCP `server/discover.instructions`；兼容旧协议时使用等价的 initialization instructions；
 2. 根据进程固定 Runtime Profile 生成的工具 description，明确 command dialect、路径风格和默认工作目录；
-3. `shell_list` 顶层固定返回 `runtime` 与 `host` 元数据；`host` 包含 mode、workspace 和脱敏 environment summary，`shell_open` 返回所属 `dialect`；
+3. `shell_list` 顶层固定返回 `runtime` 与 `host` 元数据；`host` 包含 mode 和 workspace，`shell_open` 返回所属 `dialect`；
 4. 可选提供 `shell://runtime` resource 作为诊断补充，但不能把资源是否被 Client 注入模型上下文作为正确性的前提。
 
 MCP roots 在协议版本 `2026-07-28` 已 deprecated，V1 不新增对 roots 的依赖。workspace root 使用 Server configuration 显式传递；它是默认 cwd 和相关上下文，不因本项目的可信本机模型而自动成为 sandbox 边界。
@@ -263,11 +263,7 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
   },
   "host": {
     "mode": "ide",
-    "workspace_root": "C:\\work\\project",
-    "environment": {
-      "kind": "python-venv",
-      "name": ".venv"
-    }
+    "workspace_root": "C:\\work\\project"
   },
   "shells": [
     {
@@ -281,7 +277,7 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
 }
 ```
 
-`shell_open` 成功结果固定包含 `shell_id`、`status="ready"`、最终 `cwd` 和 `dialect="bash|pwsh"`。`shell_list` 顶层固定包含 `runtime`、`host` 和 `shells`：`runtime` 至少给出 `platform`、`dialect`、`shell_version`、`default_cwd`；`host` 固定给出 `mode="standalone|ide"`、`workspace_root` 与 `environment`，其中 `environment.kind` 为 `none|python-venv|conda|custom`，`environment.name` 为宿主提供的可选非敏感显示名。不得返回原始 env、startup command、解释器绝对路径或任何 secret。每个 Shell 项固定包含 `shell_id`、`status`、`last_known_cwd`、`active_exec_id` 和 `created_at_ms`；`last_known_cwd` 在尚未确认或故障时为 `null`，`active_exec_id` 仅在 `busy`/`rebuilding` 且仍有活动 Execution 时为字符串，其他状态固定为 `null`，字段不得省略。
+`shell_open` 成功结果固定包含 `shell_id`、`status="ready"`、最终 `cwd` 和 `dialect="bash|pwsh"`。`shell_list` 顶层固定包含 `runtime`、`host` 和 `shells`：`runtime` 至少给出 `platform`、`dialect`、`shell_version`、`default_cwd`；`host` 固定给出 `mode="standalone|ide"` 与 `workspace_root`。不得返回原始 env、startup command、解释器绝对路径或任何 secret。每个 Shell 项固定包含 `shell_id`、`status`、`last_known_cwd`、`active_exec_id` 和 `created_at_ms`；`last_known_cwd` 在尚未确认或故障时为 `null`，`active_exec_id` 仅在 `busy`/`rebuilding` 且仍有活动 Execution 时为字符串，其他状态固定为 `null`，字段不得省略。
 
 `shell_close` 输入 `{"shell_id":"shell_01"}`。它先把 Shell 标记为 `closing`，终止活动 Execution 的受管前台执行树和仍在 Runtime Profile 所有权边界内的子孙，关闭 PTY 并从 Registry 移除。正常清理返回 `{"shell_id":"shell_01","status":"closed","cleanup_complete":true}`；若 `close_timeout_ms` 到期，Server 必须至少执行平台强制回收、关闭 PTY、移除 Registry 并返回相同结构但 `cleanup_complete=false`，异步 reaper 只做非阻塞收尾，不能重新暴露该 Shell。
 
@@ -894,8 +890,6 @@ Server 配置只描述自身运行环境：
 --host-profile standalone|ide
 --workspace-root <path>
 --default-cwd <optional-path>
---environment-kind none|python-venv|conda|custom
---environment-name <optional-non-sensitive-label>
 --shell <optional-compatible-executable>
 --shell-startup-timeout-ms 30000
 --command-yield-ms 10000
@@ -924,7 +918,7 @@ Server 在启动时把上述参数、启动 cwd 和继承环境冻结为 `HostCo
 
 V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`--dialect` 或 `--pty-transport`，避免调用方拼出未经验证的组合。`auto` 在 Windows 选择 `WindowsPwshProfile`，在 macOS/Linux 选择 `PosixBashProfile`；显式值与当前 OS 不兼容时启动失败。`--host-profile` 只影响 workspace/config 来源、环境初始化责任和诊断元数据，不改变七工具名称、请求 schema 或 Shell 执行语义。`HostConfig` 包裹进程选定的 Runtime Profile，但不进入 `ShellDialect`、`PtyTransport` 或 `ProcessSupervisor` ports。
 
-`--workspace-root` 与显式 `--default-cwd` 必须是启动时存在且可进入的平台原生绝对路径。`standalone` 省略 workspace 时使用 Server 启动 cwd；`ide` 必须由宿主显式提供 workspace。`environment-kind/name` 只是 Agent 可见的脱敏声明，不能驱动环境发现或执行；环境值和 startup command 永不回显。V1 不通过 deprecated MCP roots、`TERM_PROGRAM`、VS Code/Cursor 环境变量或当前进程 cwd 的偶然变化推断 IDE workspace。
+`--workspace-root` 与显式 `--default-cwd` 必须是启动时存在且可进入的平台原生绝对路径。`standalone` 省略 workspace 时使用 Server 启动 cwd；`ide` 必须由宿主显式提供 workspace。继承的环境值和 startup command 永不回显。V1 不通过 deprecated MCP roots、`TERM_PROGRAM`、VS Code/Cursor 环境变量或当前进程 cwd 的偶然变化推断 IDE workspace。
 
 `shell_startup_timeout_ms` 是 open/rebuild 从 spawn 到 startup 完成的总 deadline；`recovery_grace_ms` 是 timeout 后 soft recovery 上限；`job_cleanup_timeout_ms` 覆盖平台受管子孙枚举、terminate/kill、reap/liveness verification 和 quiet barrier，`output_quiet_ms` 是其中要求的连续无输出窗口；`close_timeout_ms` 是 close 及全局 shutdown cleanup 的硬上限，必须大于 `shutdown_grace_ms`。这些配置都必须为正整数，Server 启动时拒绝不满足关系的配置。
 
@@ -941,7 +935,7 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 - 七个工具拒绝缺失必填字段、未知字段、非法 `null`、类型错误和范围越界；`shell_write` 缺少 `text` 或携带 `data_base64`、`eof` 时必须拒绝；所有成功与错误响应符合 5.x 的字段表和矩阵。
 - standalone 与 IDE 启动相同 Server binary；在相同 Runtime Profile 和 workspace 下产生相同 Shell 行为。
 - standalone/IDE 可通过不同 `HostConfig` 设置默认 cwd、继承环境和 startup command；IDE 提供标准 Python venv 时使用 `VIRTUAL_ENV` + `PATH`/`Path`，Server 不扫描环境或依赖 `Activate.ps1`。
-- Agent 在首次构造命令前可从 instructions/tool description 获知方言，并可从 `shell_list.runtime/host` 获取权威平台、方言、workspace、默认 cwd 和脱敏环境摘要；任何 env value、startup command、解释器绝对路径或 secret 均不可见。
+- Agent 在首次构造命令前可从 instructions/tool description 获知方言，并可从 `shell_list.runtime/host` 获取权威平台、方言、workspace 和默认 cwd；任何 env value、startup command、解释器绝对路径或 secret 均不可见。
 
 ### 10.2 多持久 Command Shell
 

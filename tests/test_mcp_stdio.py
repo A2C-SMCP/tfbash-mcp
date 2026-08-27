@@ -283,10 +283,6 @@ def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
                 "ide",
                 "--workspace-root",
                 str(Path.cwd()),
-                "--environment-kind",
-                "python-venv",
-                "--environment-name",
-                "integration-venv",
                 "--startup-command",
                 startup_command,
                 "--close-timeout-ms",
@@ -310,10 +306,6 @@ def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
             assert context["host"] == {
                 "mode": "ide",
                 "workspace_root": str(Path.cwd()),
-                "environment": {
-                    "kind": "python-venv",
-                    "name": "integration-venv",
-                },
             }
             visible = repr(context)
             assert virtual_environment not in visible
@@ -425,10 +417,6 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 "ide",
                 "--workspace-root",
                 str(Path.cwd()),
-                "--environment-kind",
-                "python-venv",
-                "--environment-name",
-                "integration-venv",
                 "--startup-command",
                 startup_command,
                 "--close-timeout-ms",
@@ -458,10 +446,6 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             assert context["host"] == {
                 "mode": "ide",
                 "workspace_root": str(Path.cwd()),
-                "environment": {
-                    "kind": "python-venv",
-                    "name": "integration-venv",
-                },
             }
             visible = repr(context)
             assert virtual_environment not in visible

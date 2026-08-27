@@ -113,7 +113,7 @@ PyPI 发布由 [publish workflow](.github/workflows/publish.yml) 完成。它只
 `main` 后创建与版本完全一致的 `v<version>` GitHub Release，例如：
 
 ```bash
-gh release create v0.1.0 --target main --generate-notes
+gh release create v0.2.0 --target main --generate-notes
 ```
 
 Release tag 与 `pyproject.toml` 版本不一致，或 tag 指向的提交不属于 `main` 时，发布会在
@@ -155,7 +155,7 @@ uv run tfbash-mcp \
 
 运行参数可通过 `uv run tfbash-mcp --help` 查看。配置优先级为单次 `shell_open` 参数、
 进程级 CLI/HostConfig、Runtime Profile 默认值。继承的环境变量只用于启动 Shell；
-`shell_list` 仅返回环境类型和可选名称，不返回环境变量名、值、启动命令或其他密钥材料。
+`shell_list` 仅返回 Runtime、Host 和 Shell 状态，不返回环境变量名、值、启动命令或其他密钥材料。
 
 服务在 stdin EOF、客户端断开或取消时走同一个有界 shutdown 路径，关闭全部 Shell 及其
 受管进程。`auto` 在 macOS/Linux 选择完整的 `PosixBashProfile`，在 Windows 11 x64

@@ -47,13 +47,6 @@ class HostMode(str, Enum):
     IDE = "ide"
 
 
-class EnvironmentKind(str, Enum):
-    NONE = "none"
-    PYTHON_VENV = "python-venv"
-    CONDA = "conda"
-    CUSTOM = "custom"
-
-
 def _default_platform() -> PlatformName:
     if os.name == "nt":
         return PlatformName.WINDOWS
@@ -227,11 +220,6 @@ Identifier: TypeAlias = Annotated[
     StringConstraints(min_length=1, max_length=128),
     AfterValidator(_identifier),
 ]
-NoNulString: TypeAlias = Annotated[
-    str,
-    StringConstraints(pattern=r"^[^\x00]*$"),
-    AfterValidator(_without_nul),
-]
 NonEmptyString: TypeAlias = Annotated[
     str,
     StringConstraints(min_length=1, pattern=r"^[^\x00]*$"),
@@ -377,22 +365,9 @@ class RuntimeContext(_StrictModel):
         return self
 
 
-class EnvironmentSummary(_StrictModel):
-    kind: EnvironmentKind = Field(strict=False)
-    name: NoNulString | None = Field(default=None, exclude_if=lambda value: value is None)
-
-    @model_validator(mode="before")
-    @classmethod
-    def reject_explicit_null_name(cls, value: object) -> object:
-        if isinstance(value, dict) and "name" in value and value["name"] is None:
-            raise ValueError("name must be omitted rather than null")
-        return value
-
-
 class HostContext(_StrictModel):
     mode: HostMode = Field(strict=False)
     workspace_root: NativeAbsolutePath
-    environment: EnvironmentSummary
 
 
 class ShellListItem(_StrictModel):
@@ -879,24 +854,6 @@ def validate_schema_instance(schema: Mapping[str, object], instance: object) -> 
     _ProtocolSchemaValidator(schema).validate(instance)
 
 
-def _strip_null_variant(schema: dict[str, object]) -> None:
-    variants = schema.get("anyOf")
-    if not isinstance(variants, list):
-        return
-    non_null = [
-        variant
-        for variant in variants
-        if not (isinstance(variant, dict) and variant.get("type") == "null")
-    ]
-    if len(non_null) != 1:
-        return
-    title = schema.get("title")
-    schema.clear()
-    schema.update(cast(dict[str, object], non_null[0]))
-    if title is not None:
-        schema["title"] = title
-
-
 def _enrich_wire_schema(schema: object, config: ProtocolConfig) -> None:
     """Add runtime constraints that Pydantic cannot express in its core schema."""
 
@@ -950,11 +907,6 @@ def _enrich_wire_schema(schema: object, config: ProtocolConfig) -> None:
                 )
             elif name == "env" and config.platform is PlatformName.WINDOWS:
                 property_schema["x-caseInsensitiveUniqueKeys"] = True
-
-        if schema.get("title") == "EnvironmentSummary":
-            name_schema = properties.get("name")
-            if isinstance(name_schema, dict):
-                _strip_null_variant(name_schema)
 
         if schema.get("title") == "ShellListItem":
             active_identifier = {

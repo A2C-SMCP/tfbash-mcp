@@ -1,6 +1,6 @@
 [project]
 name = "tfbash-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A general-purpose Bash MCP server for agent systems"
 readme = "README.md"
 authors = [{ name = "A2C-SMCP" }]

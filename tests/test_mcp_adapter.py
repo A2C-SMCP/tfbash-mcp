@@ -17,7 +17,6 @@ from tfbash_mcp.protocol import PlatformName, ProtocolConfig
 from tfbash_mcp.runtime import (
     BashDialect,
     ControlIntent,
-    EnvironmentSummary,
     HostProfile,
     PexpectPosixPtyTransport,
     PosixBashProfile,
@@ -121,7 +120,6 @@ def make_service(manager: FakeManager) -> ShellToolService:
         process_cwd="/workspace",
         inherited_environment={"TFBASH_TEST_SECRET": "must-not-leak"},
         startup_command="printf configured",
-        environment_summary=EnvironmentSummary(),
         directory_exists=lambda _: True,
     )
     composition = compose_runtime(
@@ -212,7 +210,7 @@ def test_successes_and_expected_errors_are_structured_contract_results() -> None
     }
 
 
-def test_shell_list_exposes_context_but_not_inherited_environment_values() -> None:
+def test_shell_list_exposes_host_context_but_not_inherited_environment() -> None:
     service = make_service(FakeManager())
 
     result = service.call("shell_list", {})
@@ -220,7 +218,10 @@ def test_shell_list_exposes_context_but_not_inherited_environment_values() -> No
     assert result.isError is False
     assert result.structuredContent is not None
     assert result.structuredContent["runtime"]["shell_version"] == "5.2.0"
-    assert result.structuredContent["host"]["environment"] == {"kind": "none"}
+    assert result.structuredContent["host"] == {
+        "mode": "standalone",
+        "workspace_root": "/workspace",
+    }
     assert "must-not-leak" not in _text(result)
 
 

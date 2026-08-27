@@ -31,25 +31,6 @@ class HostProfile(str, Enum):
     IDE = "ide"
 
 
-class EnvironmentKind(str, Enum):
-    NONE = "none"
-    PYTHON_VENV = "python-venv"
-    CONDA = "conda"
-    CUSTOM = "custom"
-
-
-@dataclass(frozen=True, slots=True)
-class EnvironmentSummary:
-    kind: EnvironmentKind = EnvironmentKind.NONE
-    name: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.name is not None:
-            _validate_utf8(self.name, label="environment name")
-            if not self.name.strip() or "\x00" in self.name:
-                raise RuntimeConfigurationError("environment name must be non-empty and NUL-free")
-
-
 @dataclass(frozen=True, slots=True)
 class HostConfig:
     """Process-frozen host inputs, kept outside every Runtime Port."""
@@ -62,7 +43,6 @@ class HostConfig:
     default_shell: str | None = field(repr=False)
     startup_command: str | None = field(repr=False)
     environment: Mapping[str, str] = field(repr=False)
-    environment_summary: EnvironmentSummary
 
     def __post_init__(self) -> None:
         windows = self.platform is NativePlatform.WINDOWS
@@ -93,15 +73,9 @@ class HostConfig:
     def diagnostics(self) -> dict[str, object]:
         """Return the only host metadata safe for Agent-visible responses."""
 
-        environment: dict[str, object] = {
-            "kind": self.environment_summary.kind.value,
-        }
-        if self.environment_summary.name is not None:
-            environment["name"] = self.environment_summary.name
         return {
             "mode": self.host_profile.value,
             "workspace_root": self.workspace_root,
-            "environment": environment,
         }
 
 
@@ -160,7 +134,6 @@ class AgentRuntimeContext:
 class AgentHostContext:
     mode: HostProfile
     workspace_root: str
-    environment: EnvironmentSummary
 
     def __post_init__(self) -> None:
         _validate_utf8(self.workspace_root, label="workspace root")
@@ -168,13 +141,9 @@ class AgentHostContext:
             raise RuntimeConfigurationError("workspace root must be non-empty and NUL-free")
 
     def diagnostics(self) -> dict[str, object]:
-        environment: dict[str, object] = {"kind": self.environment.kind.value}
-        if self.environment.name is not None:
-            environment["name"] = self.environment.name
         return {
             "mode": self.mode.value,
             "workspace_root": self.workspace_root,
-            "environment": environment,
         }
 
 
@@ -260,7 +229,6 @@ class RuntimeComposition:
             host=AgentHostContext(
                 mode=self.host.host_profile,
                 workspace_root=self.host.workspace_root,
-                environment=self.host.environment_summary,
             ),
         )
 
@@ -323,7 +291,6 @@ def create_host_config(
     default_cwd: str | None = None,
     default_shell: str | None = None,
     startup_command: str | None = None,
-    environment_summary: EnvironmentSummary | None = None,
     directory_exists: Callable[[str], bool],
 ) -> HostConfig:
     platform = _native_platform(operating_system)
@@ -348,7 +315,6 @@ def create_host_config(
         default_shell=default_shell,
         startup_command=startup_command,
         environment=inherited_environment,
-        environment_summary=environment_summary or EnvironmentSummary(),
     )
 
 

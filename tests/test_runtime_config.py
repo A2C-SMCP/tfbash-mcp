@@ -14,8 +14,6 @@ from tfbash_mcp.protocol import (
 from tfbash_mcp.runtime import (
     AgentContext,
     DialectName,
-    EnvironmentKind,
-    EnvironmentSummary,
     HostConfig,
     HostProfile,
     NativePlatform,
@@ -98,7 +96,6 @@ def test_host_config_is_frozen_and_diagnostics_are_redacted() -> None:
         default_cwd="/workspace/project",
         default_shell="/bin/bash",
         startup_command="source env.sh",
-        environment_summary=EnvironmentSummary(EnvironmentKind.CONDA, "analysis"),
         directory_exists=lambda path: path.startswith("/"),
     )
     source_environment["TOKEN"] = "changed"
@@ -109,7 +106,6 @@ def test_host_config_is_frozen_and_diagnostics_are_redacted() -> None:
     assert host.diagnostics() == {
         "mode": "ide",
         "workspace_root": "/workspace",
-        "environment": {"kind": "conda", "name": "analysis"},
     }
     rendered = repr(host.diagnostics())
     assert "secret" not in rendered
@@ -186,7 +182,6 @@ def test_windows_paths_and_environment_use_windows_semantics() -> None:
             default_shell=None,
             startup_command=None,
             environment={"PATH": "first", "Path": "second"},
-            environment_summary=EnvironmentSummary(),
         )
 
 
@@ -277,7 +272,6 @@ def test_host_config_rejects_nul_in_native_shell_values(field: str, value: str) 
             default_shell=values["default_shell"],
             startup_command=values["startup_command"],
             environment={},
-            environment_summary=EnvironmentSummary(),
         )
 
 
@@ -302,7 +296,6 @@ def _composition(
         workspace_root=workspace,
         default_shell=shell,
         startup_command=startup_command,
-        environment_summary=EnvironmentSummary(EnvironmentKind.CONDA, "analytics"),
         directory_exists=lambda path: path == workspace,
     )
     return compose_runtime(
@@ -429,7 +422,6 @@ def test_agent_context_is_authoritative_and_redacted() -> None:
         "host": {
             "mode": "ide",
             "workspace_root": "/workspace",
-            "environment": {"kind": "conda", "name": "analytics"},
         },
     }
     visible = (
@@ -453,19 +445,6 @@ def test_agent_context_is_authoritative_and_redacted() -> None:
     )
     assert isinstance(validated, ShellListResult)
     assert validated.shells == []
-
-
-def test_environment_summary_omits_absent_name() -> None:
-    host = create_host_config(
-        host_profile=HostProfile.STANDALONE,
-        runtime_selection=RuntimeSelection.POSIX_BASH,
-        operating_system="Linux",
-        process_cwd="/workspace",
-        inherited_environment={},
-        directory_exists=lambda _: True,
-    )
-
-    assert host.diagnostics()["environment"] == {"kind": "none"}
 
 
 def test_custom_startup_is_replayed_by_each_shell_resolution() -> None:
@@ -516,13 +495,9 @@ def test_agent_context_rejects_invalid_shell_version(shell_version: str) -> None
         _composition().agent_context(shell_version=shell_version)
 
 
-@pytest.mark.parametrize("field", ["workspace", "environment", "shell_version"])
+@pytest.mark.parametrize("field", ["workspace", "shell_version"])
 def test_agent_visible_context_rejects_invalid_utf8(field: str) -> None:
     invalid = "bad\ud800value"
-    if field == "environment":
-        with pytest.raises(RuntimeConfigurationError, match="valid UTF-8"):
-            EnvironmentSummary(EnvironmentKind.CUSTOM, invalid)
-        return
     if field == "shell_version":
         with pytest.raises(RuntimeConfigurationError, match="valid UTF-8"):
             _composition().agent_context(shell_version=invalid)

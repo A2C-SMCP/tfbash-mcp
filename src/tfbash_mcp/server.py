@@ -23,8 +23,6 @@ from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_con
 from tfbash_mcp.runtime import (
     BashDialect,
     ConPtyTransport,
-    EnvironmentKind,
-    EnvironmentSummary,
     HostProfile,
     PexpectPosixPtyTransport,
     PosixBashProfile,
@@ -67,12 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--workspace-root")
     parser.add_argument("--default-cwd")
-    parser.add_argument(
-        "--environment-kind",
-        choices=tuple(value.value for value in EnvironmentKind),
-        default=EnvironmentKind.NONE.value,
-    )
-    parser.add_argument("--environment-name")
     parser.add_argument("--shell")
     parser.add_argument("--shell-startup-timeout-ms", type=_positive_integer, default=30_000)
     parser.add_argument("--command-yield-ms", type=int, default=10_000)
@@ -119,10 +111,6 @@ def build_service(
         default_cwd=arguments.default_cwd,
         default_shell=arguments.shell,
         startup_command=arguments.startup_command,
-        environment_summary=EnvironmentSummary(
-            kind=EnvironmentKind(arguments.environment_kind),
-            name=arguments.environment_name,
-        ),
         directory_exists=os.path.isdir,
     )
     composition = compose_runtime(

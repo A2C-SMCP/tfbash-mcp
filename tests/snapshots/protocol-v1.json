@@ -1068,42 +1068,9 @@
             "type": "string",
             "x-validUtf8": true
           },
-          "EnvironmentKind": {
-            "enum": [
-              "none",
-              "python-venv",
-              "conda",
-              "custom"
-            ],
-            "title": "EnvironmentKind",
-            "type": "string",
-            "x-validUtf8": true
-          },
-          "EnvironmentSummary": {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/EnvironmentKind"
-              },
-              "name": {
-                "pattern": "^[^\\x00]*$",
-                "title": "Name",
-                "type": "string",
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "title": "EnvironmentSummary",
-            "type": "object"
-          },
           "HostContext": {
             "additionalProperties": false,
             "properties": {
-              "environment": {
-                "$ref": "#/$defs/EnvironmentSummary"
-              },
               "mode": {
                 "$ref": "#/$defs/HostMode"
               },
@@ -1118,8 +1085,7 @@
             },
             "required": [
               "mode",
-              "workspace_root",
-              "environment"
+              "workspace_root"
             ],
             "title": "HostContext",
             "type": "object"
@@ -4292,42 +4258,9 @@
             "type": "string",
             "x-validUtf8": true
           },
-          "EnvironmentKind": {
-            "enum": [
-              "none",
-              "python-venv",
-              "conda",
-              "custom"
-            ],
-            "title": "EnvironmentKind",
-            "type": "string",
-            "x-validUtf8": true
-          },
-          "EnvironmentSummary": {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/EnvironmentKind"
-              },
-              "name": {
-                "pattern": "^[^\\x00]*$",
-                "title": "Name",
-                "type": "string",
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "title": "EnvironmentSummary",
-            "type": "object"
-          },
           "HostContext": {
             "additionalProperties": false,
             "properties": {
-              "environment": {
-                "$ref": "#/$defs/EnvironmentSummary"
-              },
               "mode": {
                 "$ref": "#/$defs/HostMode"
               },
@@ -4342,8 +4275,7 @@
             },
             "required": [
               "mode",
-              "workspace_root",
-              "environment"
+              "workspace_root"
             ],
             "title": "HostContext",
             "type": "object"
