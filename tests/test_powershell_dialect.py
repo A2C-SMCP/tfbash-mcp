@@ -190,7 +190,7 @@ def test_startup_record_is_incremental_and_reports_unicode_cwd() -> None:
 def test_startup_fails_closed_for_wrong_runtime_encoding_and_command() -> None:
     incompatible = cast(PowerShellProtocol, _plan().protocol)
     _bootstrap(incompatible)
-    with pytest.raises(UnsupportedShell, match="7.6.*Windows x64"):
+    with pytest.raises(UnsupportedShell, match="admitted PowerShell runtime"):
         incompatible.feed(_startup_bytes(incompatible, probe=1))
 
     encoding = cast(PowerShellProtocol, _plan().protocol)

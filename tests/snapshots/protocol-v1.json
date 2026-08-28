@@ -1062,6 +1062,7 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",
@@ -1493,15 +1494,6 @@
             "title": "Env",
             "type": "object"
           },
-          "shell": {
-            "default": "/bin/bash",
-            "pattern": "(?=^/)^[^\\x00]*$",
-            "title": "Shell",
-            "type": "string",
-            "x-nativeAbsolutePath": "linux",
-            "x-platform": "linux",
-            "x-validUtf8": true
-          },
           "startup_command": {
             "anyOf": [
               {
@@ -1529,6 +1521,7 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",
@@ -4252,6 +4245,7 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",
@@ -4684,15 +4678,6 @@
             "type": "object",
             "x-caseInsensitiveUniqueKeys": true
           },
-          "shell": {
-            "default": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-            "pattern": "^[^\\x00]*$",
-            "title": "Shell",
-            "type": "string",
-            "x-nativeAbsolutePath": "windows",
-            "x-platform": "windows",
-            "x-validUtf8": true
-          },
           "startup_command": {
             "anyOf": [
               {
@@ -4720,6 +4705,7 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",

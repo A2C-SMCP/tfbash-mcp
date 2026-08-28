@@ -24,9 +24,12 @@ from tfbash_mcp.mcp_adapter import ToolConcurrencyLimits
 from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_contract_schemas
 from tfbash_mcp.runtime import (
     ConPtyTransport,
+    DialectName,
     PosixProcessSupervisor,
     PowerShellDialect,
     RuntimeConfigurationError,
+    RuntimeName,
+    ShellResolution,
     WindowsProcessSupervisor,
     WindowsPwshProfile,
 )
@@ -42,6 +45,17 @@ from tfbash_mcp.server import (
     build_parser,
     build_service,
 )
+
+
+def _test_resolution(*, windows: bool = False) -> ShellResolution:
+    return ShellResolution(
+        runtime=RuntimeName.WINDOWS_PWSH if windows else RuntimeName.POSIX_BASH,
+        dialect=DialectName.PWSH if windows else DialectName.BASH,
+        executable=r"C:\Program Files\PowerShell\7\pwsh.exe" if windows else "/bin/bash",
+        version="7.6.3" if windows else "5.2",
+        edition="Core" if windows else None,
+        source="test",
+    )
 
 
 def test_overview_subscription_hub_coalesces_burst_notifications(
@@ -158,11 +172,15 @@ def test_build_service_selects_the_production_windows_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
-    monkeypatch.setattr(server_module, "_probe_shell_version", lambda *args, **kwargs: "7.6.3")
+    monkeypatch.setattr(
+        server_module,
+        "resolve_shell",
+        lambda *args, **kwargs: _test_resolution(windows=True),
+    )
     arguments = build_parser().parse_args(
         [
             "--runtime-profile",
-            "windows-pwsh",
+            "pwsh",
             "--shell",
             r"C:\Program Files\PowerShell\7\pwsh.exe",
         ]
@@ -214,7 +232,7 @@ def test_agent_visible_schema_omits_shell_and_startup_command_defaults() -> None
     serialized = json.dumps(contracts)
     open_properties = contracts[ToolName.SHELL_OPEN.value]["inputSchema"]["properties"]
     assert isinstance(open_properties, dict)
-    assert "default" not in open_properties["shell"]
+    assert "shell" not in open_properties
     assert "default" not in open_properties["startup_command"]
     assert secret_shell not in serialized
     assert secret_startup not in serialized
@@ -224,7 +242,11 @@ def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
-    monkeypatch.setattr(server_module, "_probe_shell_version", lambda *args, **kwargs: "5.2")
+    monkeypatch.setattr(
+        server_module,
+        "resolve_shell",
+        lambda *args, **kwargs: _test_resolution(),
+    )
     arguments = build_parser().parse_args(
         ["--close-timeout-ms", "5000", "--shutdown-grace-ms", "1234"]
     )
@@ -248,7 +270,11 @@ def test_saturated_wait_lane_cannot_starve_close_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
-    monkeypatch.setattr(server_module, "_probe_shell_version", lambda *args, **kwargs: "5.2")
+    monkeypatch.setattr(
+        server_module,
+        "resolve_shell",
+        lambda *args, **kwargs: _test_resolution(),
+    )
 
     class BlockingExecManager:
         def __init__(self) -> None:

@@ -15,6 +15,7 @@ from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from tfbash_mcp.mcp_adapter import SHELL_OVERVIEW_URI
+from tfbash_mcp.server import build_parser, build_service
 
 EXPECTED_TOOL_TAGS = {
     "shell_open": ["BuildIn", "Create"],
@@ -120,7 +121,7 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
         if sys.platform == "win32":
             runtime_arguments = [
                 "--runtime-profile",
-                "windows-pwsh",
+                "pwsh",
                 "--shell",
                 os.environ["PHASE0_PWSH"],
             ]
@@ -132,7 +133,7 @@ def test_stdio_initialize_lists_and_calls_the_seven_tools(
             )
             stdin_text = "form-ready\r\n"
         else:
-            runtime_arguments = []
+            runtime_arguments = ["--runtime-profile", "bash"]
             expected_dialect = "bash"
             command = "printf mcp-e2e"
             stdin_command = "IFS= read -r value; printf 'stdin:%s' \"$value\""
@@ -288,7 +289,7 @@ def test_cancelling_an_inflight_long_call_does_not_block_stdio_shutdown() -> Non
         if sys.platform == "win32":
             runtime_arguments = [
                 "--runtime-profile",
-                "windows-pwsh",
+                "pwsh",
                 "--shell",
                 os.environ["PHASE0_PWSH"],
             ]
@@ -352,6 +353,8 @@ def test_stdio_posix_host_environment_and_forced_control_end_to_end() -> None:
                 "tfbash_mcp",
                 "--host-profile",
                 "ide",
+                "--runtime-profile",
+                "bash",
                 "--workspace-root",
                 str(Path.cwd()),
                 "--startup-command",
@@ -494,7 +497,7 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
                 "-m",
                 "tfbash_mcp",
                 "--runtime-profile",
-                "windows-pwsh",
+                "pwsh",
                 "--shell",
                 pwsh,
                 "--host-profile",
@@ -638,3 +641,63 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
             assert closed_content["cleanup_complete"] is True
 
     anyio.run(scenario)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows ConPTY")
+@pytest.mark.parametrize(
+    ("environment_name", "runtime_profile", "command", "expected_dialect"),
+    [
+        (
+            "PHASE0_WINDOWS_POWERSHELL",
+            "pwsh",
+            "Write-Output windows-powershell-51; $global:LASTEXITCODE=37; throw 'exit'",
+            "pwsh",
+        ),
+        (
+            "PHASE0_GIT_BASH",
+            "bash",
+            "printf 'git-bash-windows\\n'; (exit 37)",
+            "bash",
+        ),
+    ],
+)
+def test_windows_alternate_shells_use_conpty(
+    environment_name: str,
+    runtime_profile: str,
+    command: str,
+    expected_dialect: str,
+) -> None:
+    executable = os.environ.get(environment_name)
+    if executable is None or not Path(executable).is_file():
+        pytest.skip(f"{environment_name} is not installed")
+    service = build_service(
+        build_parser().parse_args(
+            [
+                "--runtime-profile",
+                runtime_profile,
+                "--shell",
+                executable,
+                "--close-timeout-ms",
+                "10000",
+            ]
+        )
+    )
+    try:
+        opened = service.call("shell_open", {})
+        assert not opened.isError
+        opened_payload = cast(dict[str, Any], opened.structuredContent)
+        assert opened_payload["dialect"] == expected_dialect
+        executed = service.call(
+            "shell_exec",
+            {
+                "shell_id": opened_payload["shell_id"],
+                "command": command,
+                "yield_ms": 10_000,
+                "timeout_ms": 10_000,
+            },
+        )
+        payload = cast(dict[str, Any], executed.structuredContent)
+        assert payload["status"] == "exited"
+        assert payload["exit_code"] == 37
+    finally:
+        service.shutdown()

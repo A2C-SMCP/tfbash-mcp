@@ -2,9 +2,9 @@
 
 面向 Agent 系统的基础 MCP 工具集合。项目希望为不同 Agent 提供一组稳定、可组合、低心智负担的通用能力，例如命令执行、文件读写与检索；具体能力优先复用成熟实现，只有现有方案无法满足核心约束时才考虑适配或自研。
 
-> 当前状态：macOS/Linux 与 Windows 11 x64 均已提供七个持久 Shell 工具及 stdio
-> MCP Server。Windows Runtime 使用 PowerShell 7.6、native ConPTY 和 gated-bootstrap
-> Job Object 进程所有权。
+> 当前版本：`0.2.0`。macOS、Linux 与 Windows 11 x64 均提供七个持久 Shell 工具及
+> stdio MCP Server。Server 会发现并探测 Bash、Zsh 或 PowerShell，再与 POSIX PTY
+> 或 Windows ConPTY/Job Object 原生后端组合。
 
 ## 为什么做这个项目
 
@@ -22,9 +22,9 @@ Agent 经常需要离开纯文本推理，操作真实工作区或调用本机�
 - **信任部署环境**：第一阶段不内置 approval、sandbox、命令策略或目录边界。
 - **可控资源**：内存、磁盘、会话、进程和临时文件必须有明确上限、所有权与清理规则。
 
-## 第一阶段：Bash 工具
+## 持久 Shell 工具
 
-第一阶段聚焦 Unix 环境（Linux、macOS）下的独立通用 Bash MCP Server。目标同时覆盖：
+当前实现覆盖 macOS、Linux 和 Windows 的独立通用 Shell MCP Server。目标同时覆盖：
 
 - 程序员的构建、测试、代码检索、服务启动和日志观察；
 - 通用岗位通过已安装 CLI 或脚本完成文件处理、数据转换和环境诊断；
@@ -160,17 +160,26 @@ Server 同时暴露 `window://io.github.a2c-smcp.tfbash/shell-overview` Markdown
 `shell_list`。七个工具还通过 `Tool._meta.a2c_tool_meta.tags` 声明 `BuildIn` 和对应 CRUD
 能力标签，Computer 的更高优先级配置仍可按 A2C-SMCP v0.4.0 合并规则覆盖。
 
-运行参数可通过 `uv run tfbash-mcp --help` 查看。配置优先级为单次 `shell_open` 参数、
-进程级 CLI/HostConfig、Runtime Profile 默认值。继承的环境变量只用于启动 Shell；
+运行参数可通过 `uv run tfbash-mcp --help` 查看。`--runtime-profile` 仅接受
+`auto|bash|zsh|pwsh`。`--shell` 是进程级严格覆盖：只探测该程序，不成功时不回退；
+`shell_open` 不再接受 `shell` 字段，因此一个 MCP 进程内所有 Shell 始终使用同一版本。
+继承的环境变量只用于启动 Shell；
 `shell_list` 仅返回 Runtime、Host 和 Shell 状态，不返回环境变量名、值、启动命令或其他密钥材料。
 
 服务在 stdin EOF、客户端断开或取消时走同一个有界 shutdown 路径，关闭全部 Shell 及其
-受管进程。`auto` 在 macOS/Linux 选择完整的 `PosixBashProfile`，在 Windows 11 x64
-选择完整的 `WindowsPwshProfile`；不会按单次工具调用混用方言或 transport。
+受管进程。`auto` 的候选顺序为：macOS 系统 zsh → 其他 zsh → 系统 Bash → 其他
+Bash；Linux 系统 Bash → 其他 Bash → 系统 zsh → 其他 zsh；Windows 稳定版
+PowerShell Core → Windows PowerShell 5.1 → Git Bash。显式 `bash|zsh|pwsh` 可在任意
+拥有兼容原生实现的平台使用。Windows Bash/Zsh 使用 MSYS 路径语义执行命令，但 MCP cwd
+字段仍返回 `C:/...` Windows 路径。WSL 不在 `0.2.0` 范围内，传入 WSL 程序会得到明确错误。
+
+Zsh 不引入新的 Python 包；Bash、Zsh、PowerShell 与 Git Bash/MSYS2 都是可选的系统
+程序。使用 `uvx` 时仍只需满足项目声明的 Python/uv 与对应平台依赖；Windows 的 ConPTY
+实现继续由条件依赖 `pywinpty` 提供。
 
 ## 参与决策
 
-V1 的多 Shell + Execution 工具模型和双 Runtime Profile 已实现并通过验收。后续协议或
+0.2.0 的多 Shell + Execution 工具模型和跨平台方言/后端组合已实现。后续协议或
 Runtime 变更仍须：
 
 1. 对齐文档中的硬性门槛和未决项；

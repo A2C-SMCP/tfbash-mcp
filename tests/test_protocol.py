@@ -607,7 +607,7 @@ def test_exit_code_range_depends_on_runtime_platform() -> None:
         ),
         ExitedExecutionSnapshot,
     )
-    with pytest.raises(ValidationError, match="POSIX exit_code"):
+    with pytest.raises(ValidationError, match="selected runtime range"):
         validate_tool_output(
             ToolName.SHELL_EXEC,
             _terminal_payload(exit_code=256),

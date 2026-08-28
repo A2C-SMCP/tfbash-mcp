@@ -11,7 +11,6 @@ from threading import Event, Lock, Thread
 
 from tfbash_mcp.runtime.contracts import (
     CancellationSignal,
-    DialectName,
     ProcessOwnership,
     ProcessSupervisor,
     PtyTransport,
@@ -35,8 +34,8 @@ class RuntimePlatform(str, Enum):
 
 
 _EXPECTED_IDENTITY = {
-    RuntimeName.POSIX_BASH: (RuntimePlatform.POSIX, DialectName.BASH),
-    RuntimeName.WINDOWS_PWSH: (RuntimePlatform.WINDOWS, DialectName.PWSH),
+    RuntimeName.POSIX_BASH: RuntimePlatform.POSIX,
+    RuntimeName.WINDOWS_PWSH: RuntimePlatform.WINDOWS,
 }
 
 
@@ -92,18 +91,21 @@ class RuntimeProfile:
     )
 
     def __post_init__(self) -> None:
-        expected_platform, expected_dialect = _EXPECTED_IDENTITY[self.name]
+        expected_platform = _EXPECTED_IDENTITY[self.name]
         if self.platform is not expected_platform:
             raise RuntimeConfigurationError(
                 f"{self.name.value} requires platform {expected_platform.value}"
             )
-        components = (self.dialect, self.transport, self.supervisor)
-        if any(component.runtime_name is not self.name for component in components):
-            raise RuntimeConfigurationError("runtime components from different profiles cannot mix")
-        if self.dialect.dialect_name is not expected_dialect:
-            raise RuntimeConfigurationError(
-                f"{self.name.value} requires dialect {expected_dialect.value}"
-            )
+        backend_name = (
+            RuntimeName.WINDOWS_PWSH
+            if self.platform is RuntimePlatform.WINDOWS
+            else RuntimeName.POSIX_BASH
+        )
+        if any(
+            component.runtime_name is not backend_name
+            for component in (self.transport, self.supervisor)
+        ):
+            raise RuntimeConfigurationError("runtime transport and supervisor backends cannot mix")
 
     def open_session(
         self,
@@ -437,6 +439,27 @@ class WindowsPwshProfile(RuntimeProfile):
         super().__init__(
             name=RuntimeName.WINDOWS_PWSH,
             platform=RuntimePlatform.WINDOWS,
+            dialect=dialect,
+            transport=transport,
+            supervisor=supervisor,
+        )
+
+
+class NativeRuntimeProfile(RuntimeProfile):
+    """Compose any supported dialect with the host-native terminal backend."""
+
+    def __init__(
+        self,
+        *,
+        name: RuntimeName,
+        platform: RuntimePlatform,
+        dialect: ShellDialect,
+        transport: PtyTransport,
+        supervisor: ProcessSupervisor,
+    ) -> None:
+        super().__init__(
+            name=name,
+            platform=platform,
             dialect=dialect,
             transport=transport,
             supervisor=supervisor,

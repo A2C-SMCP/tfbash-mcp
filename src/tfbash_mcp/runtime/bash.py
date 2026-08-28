@@ -19,6 +19,7 @@ import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import PureWindowsPath
 
 from tfbash_mcp.runtime.contracts import (
     CancellationSignal,
@@ -29,7 +30,6 @@ from tfbash_mcp.runtime.contracts import (
     DialectName,
     DialectProtocol,
     DialectSessionPlan,
-    RuntimeName,
     ShellStartRequest,
     SpawnRequest,
 )
@@ -86,7 +86,6 @@ class _PendingFinalization:
 class BashDialect:
     """Create isolated Bash launch/parser pairs without importing pexpect."""
 
-    runtime_name = RuntimeName.POSIX_BASH
     dialect_name = DialectName.BASH
     default_executable = "/bin/bash"
 
@@ -95,11 +94,23 @@ class BashDialect:
         *,
         token_factory: Callable[[], str] | None = None,
         max_control_bytes: int = 65_536,
+        dialect_name: DialectName = DialectName.BASH,
+        default_executable: str = "/bin/bash",
+        launch_arguments: tuple[str, ...] = ("--noprofile", "--norc", "-i"),
+        version_variable: str = "BASH_VERSION",
+        windows_paths: bool = False,
+        shell_prelude: str = "",
     ) -> None:
         if max_control_bytes < 1024:
             raise ValueError("max_control_bytes must be at least 1024")
         self._token_factory = token_factory or (lambda: secrets.token_hex(16))
         self._max_control_bytes = max_control_bytes
+        self.dialect_name = dialect_name
+        self.default_executable = default_executable
+        self._launch_arguments = launch_arguments
+        self._version_variable = version_variable
+        self._windows_paths = windows_paths
+        self._shell_prelude = shell_prelude
 
     def prepare_session(
         self,
@@ -112,12 +123,15 @@ class BashDialect:
             raise DialectProtocolError("Bash session preparation deadline expired")
         if cancel_signal is not None and cancel_signal.is_set():
             raise DialectProtocolError("Bash session preparation was cancelled")
-        _validate_start_request(request)
+        _validate_start_request(request, windows=self._windows_paths)
         session_token = _validate_token(self._token_factory())
         protocol = BashProtocol(
             session_token=session_token,
             token_factory=self._token_factory,
             max_control_bytes=self._max_control_bytes,
+            version_variable=self._version_variable,
+            windows_paths=self._windows_paths,
+            shell_prelude=self._shell_prelude,
         )
         if cancel_signal is not None and cancel_signal.is_set():
             raise DialectProtocolError("Bash session preparation was cancelled")
@@ -129,7 +143,7 @@ class BashDialect:
         launch = DialectLaunch(
             spawn=SpawnRequest(
                 executable=request.executable,
-                arguments=("--noprofile", "--norc", "-i"),
+                arguments=self._launch_arguments,
                 cwd=request.cwd,
                 environment=launch_environment,
             ),
@@ -147,13 +161,20 @@ class BashProtocol(DialectProtocol):
         session_token: str,
         token_factory: Callable[[], str],
         max_control_bytes: int,
+        version_variable: str = "BASH_VERSION",
+        windows_paths: bool = False,
+        shell_prelude: str = "",
     ) -> None:
         self._session_token = session_token
         self._token_factory = token_factory
         self._max_control_bytes = max_control_bytes
+        self._version_variable = version_variable
+        self._windows_paths = windows_paths
+        self._shell_prelude = shell_prelude
         self._prompt = f"__TFBASH_PROMPT_{session_token}__>".encode()
         self._ready_prefix = _RECORD_SEPARATOR + f"TFBASH_READY_{session_token}:".encode()
         self._base64_variable = f"__TFBASH_BASE64_{session_token}"
+        self._base64_flag_variable = f"__TFBASH_BASE64_FLAG_{session_token}"
         self._buffer = bytearray()
         self._state = _ParserState.AWAITING_INITIAL_PROMPT
         self._pending_command: _PendingCommand | None = None
@@ -162,26 +183,32 @@ class BashProtocol(DialectProtocol):
         self._pending_finalization: _PendingFinalization | None = None
 
     def initial_input(self, startup_command: str | None) -> bytes:
-        decoder = f'"${self._base64_variable}"'
+        decoder = f'"${self._base64_variable}" "${self._base64_flag_variable}"'
         startup = ":" if startup_command is None else _encoded_eval(startup_command, decoder)
         prompt = self._prompt.decode("ascii")
         ready = self._ready_prefix[1:].decode("ascii")
         script = (
+            f"{self._shell_prelude}"
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
             f"{self._base64_variable}=$(command -v base64 2>/dev/null || :); "
-            'if [ -z "${BASH_VERSION:-}" ] || '
+            f'if [ -z "${{{self._version_variable}:-}}" ] || '
             f'[ -z "${self._base64_variable}" ]; then '
             "__tfbash_probe=1; __tfbash_rc=126; "
             "__tfbash_version_b64=''; __tfbash_cwd_b64=''; "
             "else __tfbash_probe=0; "
-            f"readonly {self._base64_variable}; "
+            f"if printf '' | \"${self._base64_variable}\" --decode >/dev/null 2>&1; then "
+            f"{self._base64_flag_variable}=--decode; "
+            f"elif printf '' | \"${self._base64_variable}\" -D >/dev/null 2>&1; then "
+            f"{self._base64_flag_variable}=-D; else __tfbash_probe=1; __tfbash_rc=126; fi; "
+            f"readonly {self._base64_variable} {self._base64_flag_variable}; "
             f"{startup}; __tfbash_rc=$?; fi; "
+            f"{self._shell_prelude}"
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
             'if [ "$__tfbash_probe" -eq 0 ]; then '
-            "__tfbash_cwd=$(pwd -P); "
-            f"__tfbash_version_b64=$(printf '%s' \"${{BASH_VERSION:-}}\" | "
+            f"__tfbash_cwd=$({self._cwd_command()}); "
+            f"__tfbash_version_b64=$(printf '%s' \"${{{self._version_variable}:-}}\" | "
             f'"${self._base64_variable}"); '
             "__tfbash_version_b64=${__tfbash_version_b64//$'\\n'/}; "
             "__tfbash_version_b64=${__tfbash_version_b64//$'\\r'/}; "
@@ -216,7 +243,7 @@ class BashProtocol(DialectProtocol):
         prompt = self._prompt.decode("ascii")
         begin = begin_marker[1:-1].decode("ascii")
         end = result_prefix[1:].decode("ascii")
-        decoder = f'"${self._base64_variable}"'
+        decoder = f'"${self._base64_variable}" "${self._base64_flag_variable}"'
         exit_code_variable = f"__tfbash_rc_{command_token}"
         command_with_exit_capture = f"{command}\n{exit_code_variable}=$?"
         script = (
@@ -225,7 +252,7 @@ class BashProtocol(DialectProtocol):
             f"{_encoded_eval(command_with_exit_capture, decoder)}; "
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
-            "__tfbash_cwd=$(pwd -P); "
+            f"__tfbash_cwd=$({self._cwd_command()}); "
             "__tfbash_cwd_b64=$(printf '%s' \"$__tfbash_cwd\" | "
             f'"${self._base64_variable}"); '
             "__tfbash_cwd_b64=${__tfbash_cwd_b64//$'\\n'/}; "
@@ -252,7 +279,7 @@ class BashProtocol(DialectProtocol):
         script = (
             "unset PROMPT_COMMAND; "
             f"PS1='{prompt} '; "
-            "__tfbash_cwd=$(pwd -P); "
+            f"__tfbash_cwd=$({self._cwd_command()}); "
             "__tfbash_cwd_b64=$(printf '%s' \"$__tfbash_cwd\" | "
             f'"${self._base64_variable}"); '
             "__tfbash_cwd_b64=${__tfbash_cwd_b64//$'\\n'/}; "
@@ -389,7 +416,7 @@ class BashProtocol(DialectProtocol):
         if probe != 0:
             raise UnsupportedShell("executable did not report a compatible Bash runtime")
         version = _decode_text_field(fields[2], "shell version")
-        cwd = _decode_cwd(fields[3])
+        cwd = _decode_cwd(fields[3], windows=self._windows_paths)
         if not version:
             raise UnsupportedShell("Bash runtime reported an empty version")
         if startup_rc != 0:
@@ -432,7 +459,7 @@ class BashProtocol(DialectProtocol):
         self._pending_result = _PendingResult(
             correlation_id=pending.correlation_id,
             exit_code=int(fields[0]),
-            cwd=_decode_cwd(fields[1]),
+            cwd=_decode_cwd(fields[1], windows=self._windows_paths),
         )
         self._state = _ParserState.FINALIZING
         return True
@@ -570,7 +597,7 @@ class BashProtocol(DialectProtocol):
         self._pending_result = _PendingResult(
             correlation_id=recovery.correlation_id,
             exit_code=0,
-            cwd=_decode_cwd(record),
+            cwd=_decode_cwd(record, windows=self._windows_paths),
         )
         self._state = _ParserState.FINALIZING
         return True
@@ -634,10 +661,13 @@ class BashProtocol(DialectProtocol):
             raise DialectProtocolError("missing Bash finalization framing state")
         return self._pending_finalization
 
+    def _cwd_command(self) -> str:
+        return 'cygpath -am "$PWD"' if self._windows_paths else "pwd -P"
+
 
 def _encoded_eval(command: str, decoder: str) -> str:
     blob = base64.b64encode(command.encode("utf-8")).decode("ascii")
-    return f"eval \"$(printf '%s' '{blob}' | {decoder} --decode)\""
+    return f"eval \"$(printf '%s' '{blob}' | {decoder})\""
 
 
 def _decode_text_field(field: bytes, label: str) -> str:
@@ -648,9 +678,10 @@ def _decode_text_field(field: bytes, label: str) -> str:
         raise DialectProtocolError(f"invalid {label} in Bash control record") from error
 
 
-def _decode_cwd(field: bytes) -> str:
+def _decode_cwd(field: bytes, *, windows: bool = False) -> str:
     cwd = _decode_text_field(field, "cwd")
-    if not posixpath.isabs(cwd) or "\x00" in cwd:
+    absolute = PureWindowsPath(cwd).is_absolute() if windows else posixpath.isabs(cwd)
+    if not absolute or "\x00" in cwd:
         raise DialectProtocolError("Bash reported an invalid cwd")
     return cwd
 
@@ -661,10 +692,14 @@ def _validate_token(token: str) -> str:
     return token
 
 
-def _validate_start_request(request: ShellStartRequest) -> None:
+def _validate_start_request(request: ShellStartRequest, *, windows: bool = False) -> None:
     for label, value in (("executable", request.executable), ("cwd", request.cwd)):
-        if not value or "\x00" in value or not posixpath.isabs(value):
-            raise UnsupportedShell(f"Bash {label} must be a NUL-free POSIX absolute path")
+        absolute = PureWindowsPath(value).is_absolute() if windows else posixpath.isabs(value)
+        if not value or "\x00" in value or not absolute:
+            path_kind = "Windows" if windows else "POSIX"
+            raise UnsupportedShell(
+                f"shell {label} must be a NUL-free native {path_kind} absolute path"
+            )
     if request.startup_command is not None and (
         not request.startup_command or "\x00" in request.startup_command
     ):

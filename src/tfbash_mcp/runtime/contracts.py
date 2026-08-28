@@ -21,6 +21,7 @@ class RuntimeName(str, Enum):
 
 class DialectName(str, Enum):
     BASH = "bash"
+    ZSH = "zsh"
     PWSH = "pwsh"
 
 
@@ -242,9 +243,6 @@ class DialectProtocol(Protocol):
 
 class ShellDialect(Protocol):
     """Creates shell framing state; never spawns or reads a PTY."""
-
-    @property
-    def runtime_name(self) -> RuntimeName: ...
 
     @property
     def dialect_name(self) -> DialectName: ...

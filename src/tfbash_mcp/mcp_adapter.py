@@ -155,7 +155,9 @@ class ShellToolService:
 
     @property
     def instructions(self) -> str:
-        return self._composition.instructions()
+        return self._composition.instructions(
+            shell_version=self._agent_context.runtime.shell_version,
+        )
 
     @property
     def tool_descriptions(self) -> dict[str, str]:
@@ -226,7 +228,6 @@ class ShellToolService:
                 ShellOpenOverrides(
                     cwd=open_request.cwd,
                     environment=open_request.env,
-                    executable=open_request.shell,
                     startup_command=startup_command,
                 ),
                 directory_exists=self._directory_exists,

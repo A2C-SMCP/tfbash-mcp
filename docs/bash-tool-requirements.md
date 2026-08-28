@@ -8,12 +8,12 @@
 | 首个集成方 | `tfrobot-client` |
 | 决策 | 独立 MCP Server；客户端不内置 Shell/PTY 实现 |
 | V1 实现 | Python 3.10–3.12、MCP Python SDK、uv/uvx；POSIX 使用 pexpect，Windows 使用经实验选定的 ConPTY transport |
-| V1 平台 | macOS/Linux：Bash + POSIX PTY；Windows 11 x64：PowerShell 7.6 LTS + native ConPTY |
+| 0.2.0 平台 | macOS/Linux：Bash、Zsh、PowerShell Core + POSIX PTY；Windows 11 x64：PowerShell 5.1/Core、Git Bash、显式 MSYS2 Zsh + native ConPTY |
 | V1 宿主 | standalone 与 IDE 共用同一 Server/工具合同；宿主只负责显式启动配置和生命周期 |
 | 合同状态 | 七个工具名、字段与领域模型已冻结；`shell_write` 仅接受 UTF-8 `text`，任意二进制 stdin 与 EOF control 未进入 V1 |
 | 信任模型 | 可信本机环境，不提供 approval、sandbox 或命令策略 |
 
-> 本文取代“在 tfrobot-client 内实现 Rust Embedded Bash Provider”的旧方案。Shell 能力被定义为可被任意 MCP Client 使用的独立 Server。`tfbash-mcp` 是当前仓库与包名，不表示公开合同只支持 Bash；V1 同时提供 POSIX Bash 与 Windows PowerShell Runtime Profile。tfrobot-client 只为每个 Computer 提供启用开关，并把该 Server 的进程与连接生命周期交给 A2C-SMCP SDK 管理。
+> 本文取代“在 tfrobot-client 内实现 Rust Embedded Bash Provider”的旧方案。Shell 能力被定义为可被任意 MCP Client 使用的独立 Server。`tfbash-mcp` 是当前仓库与包名，不表示公开合同只支持 Bash；0.2.0 支持 Bash、Zsh 与 PowerShell 方言，并将其同宿主原生 PTY/ConPTY 后端组合。tfrobot-client 只为每个 Computer 提供启用开关，并把该 Server 的进程与连接生命周期交给 A2C-SMCP SDK 管理。
 
 ## 1. 背景与决策
 
@@ -28,7 +28,7 @@ Agent 需要执行构建、测试、脚本和开发服务；短命令应快速�
 5. tfrobot-client 只保存开关并向 SDK 声明该 MCP，不管理 Shell、Execution、PTY 或输出缓冲；
 6. SDK 负责 MCP 的安装命令、拉起、连接、状态、停止和进程回收。
 
-“语言无关”指 MCP 工具合同和集成方式不依赖实现语言，并不表示 V1 没有 Python 运行时依赖。未来可以用 Rust、Go 等语言重写 Server，只要保持工具合同兼容，客户端和 SDK 无需变化。V1 明确承诺 POSIX Bash 与 native Windows PowerShell 两个 Runtime Profile；同一 Server 进程只选择一个 Profile，不能在运行中混用方言或 PTY 后端。
+“语言无关”指 MCP 工具合同和集成方式不依赖实现语言，并不表示当前版本没有 Python 运行时依赖。未来可以用 Rust、Go 等语言重写 Server，只要保持工具合同兼容，客户端和 SDK 无需变化。0.2.0 明确承诺一个 Server 进程只选择一个方言与原生终端后端组合，不能在运行中按工具调用切换。
 
 ## 2. 目标
 
@@ -55,8 +55,8 @@ Agent 需要执行构建、测试、脚本和开发服务；短命令应快速�
 
 ### 3.1 V1 范围
 
-- macOS、Linux 本机环境：Bash + POSIX PTY；
-- Windows 11 x64 本机环境：PowerShell 7.6 LTS + native ConPTY；
+- macOS、Linux 本机环境：Bash、Zsh 或 PowerShell Core + POSIX PTY；
+- Windows 11 x64 本机环境：PowerShell Desktop 5.1/Core、Git Bash 或显式 MSYS2 Zsh + native ConPTY；
 - stdio MCP 传输；
 - uv/uvx 安装与启动；
 - 一个 Server 实例可创建多个显式寻址的持久命令 Shell；
@@ -67,7 +67,7 @@ Agent 需要执行构建、测试、脚本和开发服务；短命令应快速�
 - 进程退出、超时、Server shutdown 时的完整回收；
 - MCP 进程内持久化，不跨 MCP 进程重启恢复；
 - 无固定间隔轮询：等待输出使用阻塞事件/条件变量和可选 wait timeout。
-- Server 启动时选择 `auto`、`posix-bash` 或 `windows-pwsh` Runtime Profile；
+- Server 启动时选择 `auto`、`bash`、`zsh` 或 `pwsh` Runtime Profile；
 - standalone 与 IDE Host Profile；显式 workspace root、稳定 Agent runtime context 和动态工具说明。
 
 ### 3.2 明确不提供
@@ -84,8 +84,8 @@ Agent 需要执行构建、测试、脚本和开发服务；短命令应快速�
 - SSH、串口、容器远程终端；
 - tmux/screen 协议；
 - Tauri 专用事件或终端 UI；
-- Windows PowerShell 5.1、CMD、Windows 10 和未经验证的 Windows ARM64；
-- 将 WSL 作为 native Windows 的隐式 fallback；WSL 若使用本 Server，按独立的 `posix-bash` 环境处理；
+- CMD、Windows 10 和未经验证的 Windows ARM64；
+- WSL（包括显式 `--shell wsl.exe` 和 native Windows 的隐式 fallback）；
 - Python IDE、LSP、文件编辑、活动文件/选区采集、Gym Environment。
 
 资源限额、超时、输出上限和进程树回收属于稳定性要求，不属于安全策略。
@@ -114,24 +114,19 @@ standalone MCP Client 或 IDE Host
        └── ProcessSupervisor         interrupt、terminate、kill 与回收
               │
               ▼
-       V1 Runtime Profiles（每个进程只选一个）
-       ├── PosixBashProfile
-       │   ├── BashDialect
-       │   ├── PexpectPosixPtyTransport
-       │   └── PosixProcessSupervisor
-       └── WindowsPwshProfile
-           ├── PowerShellDialect
-           ├── ConPtyTransport
-           └── WindowsProcessSupervisor
+       0.2.0 Runtime Composition（每个进程只选一个）
+       ├── ShellDialect             Bash / Zsh / PowerShell
+       ├── PtyTransport             POSIX PTY / Windows ConPTY
+       └── ProcessSupervisor        POSIX process group / Windows Job
 ```
 
-这里的 `RuntimeProfile` 是 Server 内部组合根，不是每次工具调用的选择字段。V1 注册 `PosixBashProfile` 和 `WindowsPwshProfile`，由 Server 启动配置 `auto|posix-bash|windows-pwsh` 一次选定；`auto` 只根据操作系统选择，不根据 IDE、`TERM_PROGRAM` 或命令内容猜测。同一进程内的全部 Shell 使用相同 Profile，七个工具始终面对同一个 Shell 资源模型。
+这里的 `RuntimeProfile` 是 Server 内部组合根，不是每次工具调用的选择字段。0.2.0 将方言与原生终端后端解耦，由 Server 启动配置 `auto|bash|zsh|pwsh` 一次选定；`auto` 按操作系统定义的候选顺序执行身份、能力和真实受管 PTY 探针，不根据 IDE、`TERM_PROGRAM` 或命令内容猜测。同一进程内的全部 Shell 使用同一组合。
 
 依赖方向固定为：MCP Adapter → Shell Domain → Runtime Ports；具体 Bash/PowerShell、pexpect/ConPTY 和平台进程监管实现反向实现 Runtime Ports。Shell Domain 不得导入具体 transport，不得保存 fd、HANDLE、POSIX process group、Windows Job Object 或平台 PID 枚举细节；Runtime 实现也不得自行构造 MCP error envelope 或修改 Shell/Execution 状态机。
 
 三个 Runtime Port 的职责边界如下：
 
-- `ShellDialect` 负责启动能力探针、命令包装、随机定界符、prompt/退出码解析、startup command、finalizing 和 Shell 恢复；`PosixBashProfile` 只接受 Bash-compatible executable，`WindowsPwshProfile` 只接受 PowerShell 7.6-compatible `pwsh`；
+- `ShellDialect` 负责启动能力探针、命令包装、随机定界符、prompt/退出码解析、startup command、finalizing 和 Shell 恢复；Bash、Zsh 与 PowerShell 可分别同宿主的原生 PTY/ConPTY 后端组合；
 - `PtyTransport` 负责 PTY 的创建、非阻塞字节读写、output EOF 检测、就绪等待与底层句柄关闭；它不解释命令输出，也不拥有 Execution；
 - `ProcessSupervisor` 负责把领域层的 `interrupt`、`terminate`、`kill` 和 `cleanup` 语义映射到平台进程控制机制，并维护受管进程所有权边界；领域层不直接调用 `killpg`、`jobs -p` 或未来的 Windows API。
 
@@ -225,7 +220,7 @@ Execution 状态与输出变化通过专用事件信号触发合并后的 `Resou
 - 所有工具输入和结构化输出都是 JSON object，schema 统一设置 `additionalProperties: false`；未知字段、类型不符、超出范围和不允许的 `null` 均返回 `invalid_argument`；
 - 下表标为“必填”的字段必须出现；可选字段省略时使用表中默认值。只有明确标为 nullable 的 `shell_open.startup_command`、`active_exec_id`、`last_known_cwd`、Execution snapshot 的 `exit_code` 与 `cwd` 可以为 `null`；
 - `shell_id`、`exec_id` 是 1–128 字节的非空 UTF-8 字符串；整数只接受 JSON integer，不接受浮点数或字符串转换；
-- 所有进入平台原生 path/env/argv 或 Shell command 的字符串，即 `cwd`、`shell`、`startup_command`、`command` 以及 `env` 的 key/value，都禁止 U+0000，违反时返回 `invalid_argument`；`shell_write.text` 必须是合法 UTF-8，并按编码后的字节数执行输入上限；
+- 所有进入平台原生 path/env 或 Shell command 的公共字符串，即 `cwd`、`startup_command`、`command` 以及 `env` 的 key/value，都禁止 U+0000，违反时返回 `invalid_argument`；进程级 `--shell` 在 MCP 注册前校验；`shell_write.text` 必须是合法 UTF-8，并按编码后的字节数执行输入上限；
 - `shell_open`、`shell_exec`、`shell_read`、`shell_write` 和 `shell_signal` 的字段合同以下文表格为准；`shell_list` 的输入严格为 `{}`；`shell_close` 只有一个必填的 `shell_id` 字段；
 - `env` 省略时不增加覆盖项；提供时以 key 覆盖 Server 进程继承的环境。最多 256 项，key 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，每个 UTF-8 value 不超过 32768 字节；Windows Profile 按不区分大小写的环境变量语义拒绝 `PATH`/`Path` 这类重复 key；
 - `yield_ms`、`timeout_ms`、`wait_ms` 和 `duration_ms` 使用单调时钟；只有 `created_at_ms` 是 Unix epoch wall-clock timestamp。
@@ -241,7 +236,8 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
 
 ### 5.2 `shell_open` 与 Shell 管理
 
-`shell_open` 创建持久 Command Shell，输入初始 cwd、环境、Shell 程序和可选启动命令：
+`shell_open` 创建持久 Command Shell，输入初始 cwd、环境和可选启动命令。Shell 程序已在
+Server 启动时选定，不能按会话覆盖：
 
 ```json
 {
@@ -249,7 +245,6 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
   "env": {
     "PROJECT_ENV": "development"
   },
-  "shell": "/bin/bash",
   "startup_command": "source .venv/bin/activate"
 }
 ```
@@ -260,7 +255,6 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
 |---|---|---|---|
 | `cwd` | string | 否 | `HostConfig.default_cwd`；必须是启动时存在且可进入的平台原生绝对目录 |
 | `env` | object<string,string> | 否 | `{}`；按共同规则覆盖 HostConfig 已冻结的 Server/宿主环境 |
-| `shell` | string | 否 | Server `shell`；平台原生绝对路径，且必须兼容已选 Runtime Profile（Bash 或 PowerShell 7.6） |
 | `startup_command` | string 或 null | 否 | Server `startup_command`；显式 `null` 表示不运行启动命令，字符串不能为空且不超过 `max_command_bytes` |
 
 ```json
@@ -298,14 +292,14 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
 }
 ```
 
-`shell_open` 成功结果固定包含 `shell_id`、`status="ready"`、最终 `cwd` 和 `dialect="bash|pwsh"`。`shell_list` 顶层固定包含 `runtime`、`host` 和 `shells`：`runtime` 至少给出 `platform`、`dialect`、`shell_version`、`default_cwd`；`host` 固定给出 `mode="standalone|ide"` 与 `workspace_root`。不得返回原始 env、startup command、解释器绝对路径或任何 secret。每个 Shell 项固定包含 `shell_id`、`status`、`last_known_cwd`、`active_exec_id` 和 `created_at_ms`；`last_known_cwd` 在尚未确认或故障时为 `null`，`active_exec_id` 仅在 `busy`/`rebuilding` 且仍有活动 Execution 时为字符串，其他状态固定为 `null`，字段不得省略。
+`shell_open` 成功结果固定包含 `shell_id`、`status="ready"`、最终 `cwd` 和 `dialect="bash|zsh|pwsh"`。`shell_list` 顶层固定包含 `runtime`、`host` 和 `shells`：`runtime` 至少给出 `platform`、`dialect`、`shell_version`、`default_cwd`；`host` 固定给出 `mode="standalone|ide"` 与 `workspace_root`。不得返回原始 env、startup command、解释器绝对路径或任何 secret。每个 Shell 项固定包含 `shell_id`、`status`、`last_known_cwd`、`active_exec_id` 和 `created_at_ms`；`last_known_cwd` 在尚未确认或故障时为 `null`，`active_exec_id` 仅在 `busy`/`rebuilding` 且仍有活动 Execution 时为字符串，其他状态固定为 `null`，字段不得省略。
 
 `shell_close` 输入 `{"shell_id":"shell_01"}`。它先把 Shell 标记为 `closing`，终止活动 Execution 的受管前台执行树和仍在 Runtime Profile 所有权边界内的子孙，关闭 PTY 并从 Registry 移除。正常清理返回 `{"shell_id":"shell_01","status":"closed","cleanup_complete":true}`；若 `close_timeout_ms` 到期，Server 必须至少执行平台强制回收、关闭 PTY、移除 Registry 并返回相同结构但 `cleanup_complete=false`，异步 reaper 只做非阻塞收尾，不能重新暴露该 Shell。
 
 管理约束：
 
 - Server 启动时不创建隐式默认 Shell；
-- `shell` 必须兼容进程已选 Runtime Profile；Server 在注册前执行方言专属的 prompt、退出码、Unicode 和多行包装能力探针。任意程序、Windows PowerShell 5.1/CMD 或未通过探针的 Shell 返回 `unsupported_shell`；
+- Server 启动时对候选程序执行身份、退出码、Unicode、多行、cwd/env 和真实受管 PTY/ConPTY 能力探针；PowerShell Desktop 5.1、稳定 Core、Bash 与 Zsh 按平台组合准入，CMD、WSL 或未通过探针的程序被拒绝；
 - `shell_open` 只有在初始 prompt 和 `startup_command` 成功后才注册并返回 `ready`。spawn、初始 prompt、能力探针和 startup command 共用一个从 open 被接受起计算的 `shell_startup_timeout_ms` 总 deadline；启动命令非零、deadline 到期、EOF 或 spawn 失败统一清理受管进程并返回 `shell_start_failed`，不占用 Shell 配额；
 - Shell Registry 状态为 `ready`、`busy`、`rebuilding`、`closing` 或 `error`；
 - Registry 创建、注册、关闭、列举和容量计数由 manager 级锁保护，但持锁时不得执行阻塞 PTY 操作；
@@ -326,7 +320,7 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
 }
 ```
 
-`command` 由当前 Runtime Profile 的方言解释：上例属于 Bash；Windows Profile 应使用 PowerShell 语法，例如 `Set-Location project; uv run pytest`。Server 不翻译 Bash 与 PowerShell 命令，也不根据命令内容切换方言。
+`command` 由进程选定的方言解释：上例属于 Bash/Zsh；PowerShell 应使用 `Set-Location project; uv run pytest`。Windows 也可能选择 Git Bash 或显式 MSYS2 Zsh，POSIX 也可能选择 PowerShell Core。Server 不翻译方言，也不根据命令内容切换。
 
 输入字段：
 
@@ -380,21 +374,21 @@ Schema vocabulary 无法等价表达这些条件，协议消费者必须使用�
 
 - `shell_exec` 只接受 `ready` Shell，并在启动命令前原子地把它切换为 `busy`；busy Shell 返回 `shell_busy`；
 - `max_output_bytes` 指定该 Execution 的 ring buffer 容量；省略时使用 `output_buffer_bytes`，有效范围为 4096 到 Server 配置上限，超过上限返回 `invalid_argument`；
-- 命令中的 `cd`、`export`、`source` 只影响指定 Shell 的后续调用；
-- V1 的受支持执行模型是前台命令。Runtime Profile 必须在 Shell 回到 `ready` 前识别并清理仍属于当前 Execution 的受管子孙：POSIX 可使用 Bash jobs/process group，Windows 使用经实验确定的 process-tree/Job Object 所有权；清理期间的输出仍属于当前 Execution，清理失败则以 `shell_error` 封存并把 Shell 置为 `error`；
+- 命令中的 cwd/env 修改使用当前方言的原生语法，并只影响指定 Shell 的后续调用；
+- V1 的受支持执行模型是前台命令。Runtime Profile 必须在 Shell 回到 `ready` 前识别并清理仍属于当前 Execution 的受管子孙：POSIX supervisor 按受管 session/process group/后代身份清理，Windows 使用经实验确定的 process-tree/Job Object 所有权；清理期间的输出仍属于当前 Execution，清理失败则以 `shell_error` 封存并把 Shell 置为 `error`；
 - `disown`、`nohup`、`setsid`、double-fork、PowerShell 脱离进程或其他逃离 Runtime Profile 所有权边界的 daemonization 明确不受 V1 支持；可信调用方必须用前台长命令配合 `shell_exec`/`shell_read`，或为并行任务创建另一个 Shell。Server 不承诺发现、控制或回收已逃离所有权边界的进程，也不承诺这类命令的迟到输出隔离；
 - POSIX PTY 与 ConPTY 都返回 combined terminal text output，V1 不承诺 stdout/stderr 原始分流；
-- Execution 状态为 `running`、`exited`、`timeout`、`cancelled` 或 `shell_error`；只要 Bash 恢复 prompt 并返回 `$?`，无论此前是否投递过信号，都归类为 `exited`，非零退出码仍属于 `exited`；
+- Execution 状态为 `running`、`exited`、`timeout`、`cancelled` 或 `shell_error`；只要当前方言恢复受控 prompt 并返回可信退出码，无论此前是否投递过信号，都归类为 `exited`，非零退出码仍属于 `exited`；
 - `shell_exec` 和 `shell_read` 共享同一 Execution snapshot 字段：`shell_id`、`exec_id`、`status`、`exit_code`、`output`、`buffer_start_cursor`、`next_cursor`、`truncated_before_cursor`、`eof`；终态还应返回 `duration_ms`、`cwd`、`shell_status` 和 `shell_rebuilt`。其中 `cwd` 是命令结束后最后一次成功确认的目录；若 Shell 在确认前关闭或故障则为 `null`，不得为获取它继续操作失效 PTY；
 - `exec_id` 在 Server 进程内唯一，后续 read/write/signal 必须同时匹配所属 `shell_id`，防止跨 Shell 误用；
 - Execution 与 Shell 的终态映射必须遵守 5.6 的状态转换表，不能假定任意 Execution 终态都会使 Shell 恢复 `ready`；已完成 Execution 的输出按 retention 和数量上限保留。
 
 #### 内部 finalizing gate
 
-driver 识别到用户命令的退出码/prompt 定界符后、完成 Bash job cleanup 和 output quiet barrier 前，Execution 对外仍返回 `running`，但内部进入 `finalizing`：
+driver 识别到用户命令的退出码/prompt 定界符后、完成受管子孙 cleanup 和 output quiet barrier 前，Execution 对外仍返回 `running`，但内部进入 `finalizing`：
 
 - 进入 `finalizing` 的 CAS 同时关闭 input gate、取消命令 `timeout_ms` deadline、丢弃尚未投递到 PTY 的 queued write 并释放容量；这些 write 已经返回 `accepted`，不再承诺投递；
-- 此后新的或尚未求值的 `shell_write`/`shell_signal` 固定返回 `exec_not_active`，绝不能把用户输入或信号作用于 Bash prompt、内部 cleanup 命令或下一条 Execution；
+- 此后新的或尚未求值的 `shell_write`/`shell_signal` 固定返回 `exec_not_active`，绝不能把用户输入或信号作用于方言 prompt、内部 cleanup 命令或下一条 Execution；
 - job cleanup、reap 和 output quiet 必须在 `job_cleanup_timeout_ms` 总 deadline 内完成，其中 quiet 表示 PTY 连续 `output_quiet_ms` 无新字节；成功后才封存为 `exited`，deadline 到期则封存为 `shell_error` 并把 Shell 置为 `error`；
 - close/shutdown 仍可通过保留控制通道抢占 `finalizing`，并按 5.6 的终态 CAS 规则产生 `cancelled` 或保留已先封存的终态。
 
@@ -404,7 +398,7 @@ Snapshot 中所有共同字段都必须出现，终态附加字段只在终态�
 |---|---|---|
 | `shell_id` / `exec_id` | string | 始终出现，遵守共同 ID 约束 |
 | `status` | enum | 始终出现，取下表五种值 |
-| `exit_code` | integer 或 null | 始终出现；只有 `exited` 非空。POSIX 为 0–255；Windows 将原生 32-bit 退出码规范化为 0–4294967295 |
+| `exit_code` | integer 或 null | 始终出现；只有 `exited` 非空。Bash/Zsh 与 POSIX PowerShell 为 0–255；Windows PowerShell 将原生 32-bit 退出码规范化为 0–4294967295 |
 | `output` | string | 始终出现，是本次 cursor 窗口内的规范化 UTF-8 文本 |
 | `buffer_start_cursor` / `next_cursor` | integer | 始终出现，非负且 `buffer_start_cursor <= next_cursor <= write_cursor` |
 | `truncated_before_cursor` / `eof` | boolean | 始终出现 |
@@ -557,7 +551,7 @@ worker 求值时再次确认 `exec_id` 仍为活动 Execution，并在控制请�
 
 - `interrupt` 是协作式中断当前前台工作：POSIX 映射到前台进程组中断，Windows 映射到 ConPTY/控制台 Ctrl-C 路径；`terminate` 和 `kill` 分别请求有宽限与强制的受管执行树回收，不能只处理直接子进程；
 - `shell_signal` 入队时原子预留一个 pending operation；队列已满返回 `resource_limit`。MCP 调用等待 worker 实际尝试投递后才返回 `delivered` 或结构化错误；
-- `delivered` 只表示 OS 接受信号投递，不代表进程已经退出；prompt driver 无法仅凭 Bash `$?` 区分真实 signal wait status 与显式同值退出，因此信号后的可信 prompt 仍统一产生 `exited`，最终状态必须通过 Execution snapshot 判断；
+- `delivered` 只表示 OS 接受信号投递，不代表进程已经退出；prompt driver 无法仅凭方言退出码区分真实 signal wait status 与显式同值退出，因此信号后的可信 prompt 仍统一产生 `exited`，最终状态必须通过 Execution snapshot 判断；
 - write/signal 的 `exec_id` 不是当前活动 Execution 时返回 `exec_not_active`；
 - 每个 `ShellWorker` 通过单一操作队列串行处理 exec、write、signal、close 和内部恢复，任何 MCP handler 不直接操作 PTY；
 - `shell_close` 可以关闭 busy Shell：它原子地拒绝新操作，取消活动 Execution，并在 `close_timeout_ms` 总 deadline 内按 terminate → `shutdown_grace_ms` → kill 回收受管进程；deadline 到期按 5.2 的 `cleanup_complete=false` 合同有界返回；
@@ -702,7 +696,7 @@ Execution 到达终态不依赖调用方持续读取；`ShellWorker` 始终负�
 
 - POSIX Shell 运行在独立 process group/session；Windows Shell 使用 Phase 0 选定的 Job Object 或带创建时间身份围栏的进程树监管，不能把 shell pid 冒充真实 foreground process group；
 - `shell_signal` 和 timeout 恢复作用于活动 Execution 的受管前台工作，具体映射遵守 5.5 的领域控制语义；
-- POSIX driver 在恢复 `ready` 前清理 `jobs -p` 可发现的 running/stopped Bash jobs；Windows supervisor 必须对 shell 与当前可观察子孙做身份围栏、分层回收和存活复核；
+- POSIX supervisor 在恢复 `ready` 前按受管 session/process group/后代身份清理；Windows supervisor 必须对 shell 与当前可观察子孙做身份围栏、分层回收和存活复核；
 - V1 对 Runtime Profile 所捕获的受管 descendant 承诺完整回收；显式逃离 session/Job Object/受管树的进程不在所有权边界内，具体限制遵守 5.3；
 - Server 收到宿主终止、stdin EOF、正常退出或异常关闭时执行同一 `ShutdownCoordinator`；
 - `ShutdownCoordinator` 并行关闭所有 Shell，并以 `close_timeout_ms` 作为整个 shutdown 的全局 cleanup deadline；到期后执行平台强制回收、关闭所有 PTY/fd/HANDLE 并允许进程退出，不能无限等待 reap；
@@ -907,7 +901,7 @@ Server 配置只描述自身运行环境：
 
 ```text
 --transport stdio
---runtime-profile auto|posix-bash|windows-pwsh
+--runtime-profile auto|bash|zsh|pwsh
 --host-profile standalone|ide
 --workspace-root <path>
 --default-cwd <optional-path>
@@ -933,11 +927,11 @@ Server 配置只描述自身运行环境：
 --startup-command <optional>
 ```
 
-Server 在启动时把上述参数、启动 cwd 和继承环境冻结为 `HostConfig`。`default_cwd` 省略时等于 `workspace_root`；`shell`、`default_cwd` 和 `startup_command` 是 `shell_open` 未传对应字段时使用的 Server 级默认配置，但 Server 启动时不隐式创建 Command Shell。优先级逐字段固定为 `shell_open` 显式值 > `HostConfig` > Runtime Profile 默认值；`shell_open.startup_command=null` 仍表示仅为该 Shell 禁用宿主默认 startup command。
+Server 在启动时把上述参数、启动 cwd 和继承环境冻结为 `HostConfig`。`default_cwd` 省略时等于 `workspace_root`；`--shell` 是进程级严格覆盖，失败时不回退，且不会出现在 `shell_open` schema 中。`default_cwd` 和 `startup_command` 可由 `shell_open` 覆盖；`shell_open.startup_command=null` 表示仅为该 Shell 禁用宿主默认 startup command。
 
 `active_venv_cmd` 改名为通用的 `startup_command`；它可以加载 Conda、direnv 或其他需要 Shell 命令的项目环境，不把协议绑定到 Python。标准 Python venv 应由 standalone launcher 或 IDE 解析后，通过 MCP stdio descriptor/process environment 注入 `VIRTUAL_ENV` 并把 venv 的 `bin` 或 `Scripts` 目录预置到 `PATH`/`Path`；这部分环境随 Server 进程继承，不作为可能泄密的 CLI 参数，也不依赖 PowerShell execution policy。Server 不扫描项目寻找虚拟环境。
 
-V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`--dialect` 或 `--pty-transport`，避免调用方拼出未经验证的组合。`auto` 在 Windows 选择 `WindowsPwshProfile`，在 macOS/Linux 选择 `PosixBashProfile`；显式值与当前 OS 不兼容时启动失败。`--host-profile` 只影响 workspace/config 来源、环境初始化责任和诊断元数据，不改变七工具名称、请求 schema 或 Shell 执行语义。`HostConfig` 包裹进程选定的 Runtime Profile，但不进入 `ShellDialect`、`PtyTransport` 或 `ProcessSupervisor` ports。
+0.2.0 公开组合级 `--runtime-profile auto|bash|zsh|pwsh`，不公开 backend 参数。方言与 OS 解耦，Server 根据候选程序能力推断并组合 POSIX PTY 或 Windows ConPTY 后端。`auto` 在 macOS 优先系统 zsh，在 Linux 优先系统 Bash，在 Windows 依次尝试稳定 PowerShell Core、Windows PowerShell 5.1 和 Git Bash；显式方言可在任意存在兼容原生实现的平台使用。WSL 明确拒绝。`--host-profile` 只影响 workspace/config 来源、环境初始化责任和诊断元数据。
 
 `--workspace-root` 与显式 `--default-cwd` 必须是启动时存在且可进入的平台原生绝对路径。`standalone` 省略 workspace 时使用 Server 启动 cwd；`ide` 必须由宿主显式提供 workspace。继承的环境值和 startup command 永不回显。V1 不通过 deprecated MCP roots、`TERM_PROGRAM`、VS Code/Cursor 环境变量或当前进程 cwd 的偶然变化推断 IDE workspace。
 
@@ -984,7 +978,7 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 ### 10.4 输入、信号与输出控制
 
 - `shell_write` 只接受 UTF-8 `text` 并向活动 Execution 写入其编码字节；V1 不提供任意二进制 stdin 或 EOF control；
-- `shell_signal` 可向活动 Execution 发送 `interrupt`、`terminate` 或 `kill`，两个 Runtime Profile 均满足相同领域结果；
+- `shell_signal` 可向活动 Execution 发送 `interrupt`、`terminate` 或 `kill`，所有受支持方言/原生后端组合均满足相同领域结果；
 - write/signal 携带错误、过期或非活动 `exec_id` 时不会影响当前命令；
 - 单次 write 和 per-Shell pending operation/input bytes 都受配置上限约束；并发洪泛超限时原子返回 `resource_limit`，出队、失败或 close 后容量可复用；
 - `shell_close` 可关闭 busy Shell，并终止 Runtime Profile 捕获的受管执行树；V1 不承诺回收显式逃离平台所有权边界的 daemon；
@@ -1005,20 +999,20 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 1. 迁移 ide4ai 的 prompt、退出码、cwd/env、venv、多行、heredoc、超时恢复和 EOF 测试，作为 POSIX 基线；
 2. 新增多 Command Shell 的创建、寻址、状态隔离、同 Shell 单活动 Execution、跨 Shell 并发、close 与等待中 exec/read 及已接受 write/signal 的线性化、close cancellation CAS 前后自然退出两种强制 interleaving、自动重建失败、并发创建数量上限、close deadline 的 `cleanup_complete=false` 和全局 shutdown deadline 测试；
 3. 新增短命令终态 snapshot、超大短命令截断、长命令 yield 后继续运行、`yield_ms`/`timeout_ms` 分离、exec_id 隔离、cursor/ring buffer 淘汰、伪造/过期/UTF-8 中间 cursor、UTF-8/ANSI 跨 chunk、非法 UTF-8 在 output EOF 时 decoder flush、事件等待、阻塞 read waiter 配额/释放、UTF-8 文本 stdin、semantic control、平台后台子孙 cleanup、cleanup/quiet deadline、所有权 escape、TTL 与数量上限同时触发的测试；
-4. 为七工具 schema/error contract 增加缺字段、未知字段、非法 null、平台原生 path/env/Shell command 边界字段中的 U+0000、Windows env key 大小写冲突、类型/范围边界、`shell_write.text` UTF-8 字节上限、已移除 `data_base64`/`eof` 的拒绝行为、每种响应 union 和 retryable 映射测试；增加 finalizing gate 拒绝 write/signal 且输入不跨 Execution、write 单次上限、pending ops/bytes 洪泛、原子拒绝、PTY 长时间不可写时 signal/close/shutdown 仍可推进、未投递尾部释放及 close 后容量复用测试；
+4. 为七工具 schema/error contract 增加缺字段、未知字段、非法 null、平台原生 path/env/command 边界字段中的 U+0000、Windows env key 大小写冲突、类型/范围边界、`shell_write.text` UTF-8 字节上限、已移除 `shell_open.shell`/`data_base64`/`eof` 的拒绝行为、每种响应 union 和 retryable 映射测试；增加 finalizing gate 拒绝 write/signal 且输入不跨 Execution、write 单次上限、pending ops/bytes 洪泛、原子拒绝、PTY 长时间不可写时 signal/close/shutdown 仍可推进、未投递尾部释放及 close 后容量复用测试；
 5. 使用真实 pexpect/PTY 做集成测试，不能把承载 PTY 契约的一层全部 mock 掉；
 6. 使用标准 MCP stdio client 做端到端测试；
 7. 在 macOS、Linux 和 Windows 11 x64 CI 分别执行真实 PTY 集成矩阵；Windows 关键进程树/控制场景还需至少一个真实 native runner 复核；
 8. 增加 tfrobot-client + SDK 集成测试，验证开关、descriptor、启动状态和停止回收；
 9. 终端 UI 若后续接入，先单独评审 Terminal mode 的真实场景、raw byte 与 resize 合同，不建立平行 Registry；
-10. Shell Domain 测试使用 Runtime Port test double 验证平台无关状态机；另加依赖边界检查，禁止 `shell/domain` 导入 pexpect、pywinpty 或平台进程 API。承载真实 PTY、控制和进程树语义的测试必须在两个 V1 Runtime Profile 运行，不能以 test double 代替；
+10. Shell Domain 测试使用 Runtime Port test double 验证平台无关状态机；另加依赖边界检查，禁止 `shell/domain` 导入 pexpect、pywinpty 或平台进程 API。承载真实 PTY、控制和进程树语义的测试必须覆盖 POSIX 与 Windows 原生后端及主要方言组合，不能以 test double 代替；
 11. standalone/IDE 组合测试验证同一 binary、HostConfig 优先级、显式 workspace/default cwd、标准 Python venv 的 `VIRTUAL_ENV` + `PATH`/`Path` 注入、Conda/custom startup command 的方言适配与 rebuild 重放、初始化失败清理、runtime instructions、动态工具 description 和 `shell_list.runtime/host` 脱敏摘要；并验证 Server 不扫描 `.venv`/Poetry/Conda、不依赖 `Activate.ps1`、MCP roots 或编辑器标识环境变量，且不回显 env value/startup command/secret。
 
 ## 12. 实施顺序
 
 1. Phase 0 在真实 Windows 11 x64 上对比 ConPTY transport 与 Windows ProcessSupervisor 候选，验证 Unicode、快速退出尾部、control、EOF、进程树和 shutdown；
 2. 根据实验结果冻结第 5 节七工具字段、协议 DTO、错误合同以及 Shell/Execution 平台无关状态机；
-3. 定义最小 `ShellDialect`、`PtyTransport`、`ProcessSupervisor` Runtime Ports，并由 composition root 组装 `PosixBashProfile` 与 `WindowsPwshProfile`；
+3. 定义最小 `ShellDialect`、`PtyTransport`、`ProcessSupervisor` Runtime Ports，并由 composition root 独立组合方言与宿主原生终端后端；
 4. 从 ide4ai 抽取 `BashDialect`、`PexpectPosixPtyTransport` 所需的最小逻辑和既有回归测试；
 5. 参考 DeepSeek/Codex 的边界实现 `PowerShellDialect`、`ConPtyTransport` 与 `WindowsProcessSupervisor`，不复制其模型工具合同；
 6. 建立独立 Shell MCP entry point、HostConfig、runtime context、`CommandShellManager` 和显式 `shell_id` 工具合同；
@@ -1041,10 +1035,10 @@ V1 公开一个组合级 `--runtime-profile`，不分别公开 `--platform`、`-
 | 是否一进程服务多个 Computer | 否，一个 Computer 一个 MCP 进程 |
 | 工具是否携带 Computer ID | 否 |
 | V1 实现语言 | Python，但 MCP 合同语言无关 |
-| V1 平台范围 | macOS/Linux：Bash + POSIX PTY；Windows 11 x64：PowerShell 7.6 LTS + native ConPTY |
+| 0.2.0 平台范围 | macOS/Linux：Bash、Zsh、PowerShell Core + POSIX PTY；Windows 11 x64：PowerShell 5.1/Core、Git Bash、显式 MSYS2 Zsh + native ConPTY |
 | 七工具合同 | 工具名、字段与领域模型已冻结；`shell_write` 仅含必填 `shell_id`、`exec_id`、`text`，任意二进制 stdin 与 EOF control 已在 V1 冻结前删除 |
 | 平台分层 | Shell Domain 只依赖 `ShellDialect`、`PtyTransport`、`ProcessSupervisor` Runtime Ports |
-| Runtime Profile 选择 | V1 启动时选择 `auto|posix-bash|windows-pwsh`，一个进程只使用一个完整 Profile |
+| Runtime Profile 选择 | 0.2.0 启动时选择 `auto|bash|zsh|pwsh`，一个进程只使用一个方言与原生后端组合 |
 | Windows 路线 | V1 已选定 pywinpty/ConPTY + Job Object 受管进程树，并已通过 Windows 11 原生 gate 冻结合同 |
 | Host Profile | `standalone|ide` 共用 Server 与七工具；以不可变 HostConfig 表达 workspace/default cwd、宿主环境和 startup command 差异 |
 | 环境初始化 | IDE/launcher 负责解析；标准 Python venv 注入 `VIRTUAL_ENV` + `PATH`/`Path`，Conda/custom 可用方言专属 startup command；Server 不扫描项目环境 |

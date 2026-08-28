@@ -478,6 +478,7 @@ def test_runtime_boundary_has_no_platform_or_mcp_imports() -> None:
             "windows_bootstrap.py",
             "windows_process.py",
             "windows_win32.py",
+            "resolver.py",
         }:
             continue
         tree = ast.parse(source.read_text())

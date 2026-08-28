@@ -59,7 +59,9 @@ jobs:
             tests/test_mcp_adapter.py \
             tests/test_server_config.py \
             tests/test_runtime_contracts.py \
+            tests/test_shell_resolver.py \
             tests/test_bash_dialect.py \
+            tests/test_zsh_dialect.py \
             tests/test_posix_pty.py \
             tests/test_posix_process.py::test_domain_control_targets_real_bash_foreground_group_and_recovers \
             tests/test_posix_process.py::test_control_reaches_pipeline_after_process_group_leader_exits \
@@ -99,6 +101,8 @@ jobs:
           }
           Expand-Archive -Path $archive -DestinationPath $install
           "PHASE0_PWSH=$(Join-Path $install 'pwsh.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHASE0_WINDOWS_POWERSHELL=$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHASE0_GIT_BASH=$env:ProgramFiles\Git\bin\bash.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install locked dependencies
         run: uv sync --locked --all-groups --python 3.12.10
@@ -113,6 +117,7 @@ jobs:
             tests/test_mcp_adapter.py `
             tests/test_server_config.py `
             tests/test_runtime_contracts.py `
+            tests/test_shell_resolver.py `
             tests/test_powershell_dialect.py `
             tests/test_windows_bootstrap.py `
             tests/test_windows_conpty.py `

@@ -424,11 +424,12 @@ def test_command_wrapper_preserves_multiline_and_heredoc_bytes() -> None:
     frame = protocol.wrap_command(command)
     match = re.search(
         rb"printf '%s' '([A-Za-z0-9+/=]+)' \| "
-        rb'"\$__TFBASH_BASE64_[A-Za-z0-9]+" --decode',
+        rb'"\$__TFBASH_BASE64_[A-Za-z0-9]+" "\$__TFBASH_BASE64_FLAG_[A-Za-z0-9]+"',
         frame.input_bytes,
     )
 
     assert match is not None
+    assert b"--decode --decode" not in frame.input_bytes
     command_token = frame.correlation_id.removeprefix("bash_")
     exit_code_variable = f"__tfbash_rc_{command_token}"
     assert base64.b64decode(match.group(1)).decode() == (f"{command}\n{exit_code_variable}=$?")

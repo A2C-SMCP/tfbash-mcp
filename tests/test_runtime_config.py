@@ -76,12 +76,12 @@ def test_auto_selects_windows_using_only_operating_system() -> None:
         (RuntimeSelection.WINDOWS_PWSH, "Linux"),
     ],
 )
-def test_explicit_incompatible_profile_fails(
+def test_explicit_dialects_use_the_native_backend(
     selection: RuntimeSelection,
     operating_system: str,
 ) -> None:
-    with pytest.raises(RuntimeConfigurationError, match="incompatible"):
-        resolve_runtime(selection, operating_system=operating_system)
+    expected = RuntimeName.WINDOWS_PWSH if operating_system == "Windows" else RuntimeName.POSIX_BASH
+    assert resolve_runtime(selection, operating_system=operating_system) is expected
 
 
 def test_host_config_is_frozen_and_diagnostics_are_redacted() -> None:
@@ -314,7 +314,6 @@ def test_shell_open_precedence_and_explicit_null_startup() -> None:
         ShellOpenOverrides(
             cwd="/project",
             environment={"PATH": "/request/bin", "LOCAL": "yes"},
-            executable="/opt/bash",
             startup_command=None,
         ),
         directory_exists=lambda path: path in {"/workspace", "/project"},
@@ -325,7 +324,7 @@ def test_shell_open_precedence_and_explicit_null_startup() -> None:
     assert defaults.startup_command == "conda activate analytics"
     assert dict(defaults.environment) == {"PATH": "/host/bin", "TOKEN": "secret"}
     assert explicit.cwd == "/project"
-    assert explicit.executable == "/opt/bash"
+    assert explicit.executable == "/bin/bash"
     assert explicit.startup_command is None
     assert dict(explicit.environment) == {
         "PATH": "/request/bin",
@@ -462,16 +461,6 @@ def test_shell_open_rejects_missing_cwd_and_invalid_explicit_values() -> None:
 
     with pytest.raises(RuntimeConfigurationError, match="existing"):
         composition.resolve_shell_start(directory_exists=lambda _: False)
-    with pytest.raises(RuntimeConfigurationError, match="absolute"):
-        composition.resolve_shell_start(
-            ShellOpenOverrides(executable="bash"),
-            directory_exists=lambda _: True,
-        )
-    with pytest.raises(RuntimeConfigurationError, match="absolute"):
-        composition.resolve_shell_start(
-            ShellOpenOverrides(executable=""),
-            directory_exists=lambda _: True,
-        )
     with pytest.raises(RuntimeConfigurationError, match="duplicate environment"):
         _composition(operating_system="Windows").resolve_shell_start(
             ShellOpenOverrides(environment={"Path": "first", "PATH": "second"}),

@@ -39,6 +39,7 @@ class PlatformName(str, Enum):
 
 class DialectName(str, Enum):
     BASH = "bash"
+    ZSH = "zsh"
     PWSH = "pwsh"
 
 
@@ -79,6 +80,7 @@ class ProtocolConfig:
     """Runtime facts and limits needed to resolve and validate wire values."""
 
     platform: PlatformName = field(default_factory=_default_platform)
+    dialect: DialectName = field(default=cast(DialectName, None))
     default_cwd: str = field(default_factory=os.getcwd)
     shell: str = field(default_factory=_native_default_shell)
     startup_command: str | None = None
@@ -92,6 +94,13 @@ class ProtocolConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.platform, PlatformName):
             raise TypeError("platform must be a PlatformName")
+        if self.dialect is None:
+            inferred = (
+                DialectName.PWSH if self.platform is PlatformName.WINDOWS else DialectName.BASH
+            )
+            object.__setattr__(self, "dialect", inferred)
+        elif not isinstance(self.dialect, DialectName):
+            raise TypeError("dialect must be a DialectName")
         if self.max_command_bytes < 1:
             raise ValueError("max_command_bytes must be positive")
         if self.output_buffer_bytes < 4_096:
@@ -114,10 +123,12 @@ class ProtocolConfig:
                 raise ValueError("startup_command exceeds max_command_bytes")
 
     @property
-    def dialect(self) -> DialectName:
-        if self.platform is PlatformName.WINDOWS:
-            return DialectName.PWSH
-        return DialectName.BASH
+    def maximum_exit_code(self) -> int:
+        return (
+            4_294_967_295
+            if self.platform is PlatformName.WINDOWS and self.dialect is DialectName.PWSH
+            else 255
+        )
 
 
 DEFAULT_PROTOCOL_CONFIG = ProtocolConfig()
@@ -254,7 +265,6 @@ class ToolName(str, Enum):
 class ShellOpenInput(_StrictModel):
     cwd: NativeAbsolutePath = DEFAULT_PROTOCOL_CONFIG.default_cwd
     env: Environment = Field(default_factory=dict)
-    shell: NativeAbsolutePath = DEFAULT_PROTOCOL_CONFIG.shell
     startup_command: Command | None = DEFAULT_PROTOCOL_CONFIG.startup_command
 
     @model_validator(mode="after")
@@ -433,8 +443,8 @@ class ExitedExecutionSnapshot(_TerminalExecutionSnapshot):
 
     @model_validator(mode="after")
     def validate_platform_exit_code(self, info: ValidationInfo) -> ExitedExecutionSnapshot:
-        if _protocol_config(info).platform is not PlatformName.WINDOWS and self.exit_code > 255:
-            raise ValueError("POSIX exit_code must not exceed 255")
+        if self.exit_code > _protocol_config(info).maximum_exit_code:
+            raise ValueError("exit_code exceeds the selected runtime range")
         return self
 
 
@@ -659,7 +669,6 @@ def _configured_payload(tool: ToolName, value: object, config: ProtocolConfig) -
         ToolName.SHELL_OPEN: {
             "cwd": config.default_cwd,
             "env": {},
-            "shell": config.shell,
             "startup_command": config.startup_command,
         },
         ToolName.SHELL_EXEC: {
@@ -1062,7 +1071,7 @@ def tool_contract_schemas(
 
         output_schema = _OUTPUT_ADAPTERS[tool].json_schema()
         _set_mcp_object_root(output_schema)
-        maximum_exit_code = 4_294_967_295 if config.platform is PlatformName.WINDOWS else 255
+        maximum_exit_code = config.maximum_exit_code
         _set_exit_code_maximum(output_schema, maximum_exit_code)
         _bind_output_profile(tool, output_schema, config)
         _enrich_wire_schema(output_schema, config)
