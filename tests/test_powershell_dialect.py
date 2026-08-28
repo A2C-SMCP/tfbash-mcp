@@ -148,6 +148,27 @@ def test_prepare_session_builds_pinned_noninteractive_pwsh_launch() -> None:
     assert isinstance(plan.protocol, PowerShellProtocol)
 
 
+def test_posix_launch_uses_console_input_without_native_line_editing() -> None:
+    plan = PowerShellDialect(
+        token_factory=_token_factory("A" * 32),
+        default_executable="/usr/bin/pwsh",
+        windows_paths=False,
+    ).prepare_session(
+        ShellStartRequest(
+            executable="/usr/bin/pwsh",
+            cwd="/workspace",
+            environment={"PROJECT": "test"},
+            startup_command=None,
+        )
+    )
+
+    launch_script = base64.b64decode(plan.launch.spawn.arguments[5]).decode("utf-16-le")
+    assert "[Console]::In.ReadLine()" in launch_script
+    assert "[ScriptBlock]::Create($__tf_input)" in launch_script
+    assert "/bin/stty -echo -icanon min 1 time 0" in launch_script
+    assert "TFPWSH_LAUNCH_" in launch_script
+
+
 def test_default_executable_is_drive_qualified_pwsh_7() -> None:
     assert PowerShellDialect.default_executable == r"C:\Program Files\PowerShell\7\pwsh.exe"
 

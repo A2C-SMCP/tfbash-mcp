@@ -158,7 +158,61 @@ def _synthetic_session(
     session._closed = False
     session._close_lock = Lock()
     session._read_guard = Lock()
+    session._write_lock = Lock()
+    session._terminal_query_tail = b""
+    session._terminal_responses = bytearray()
     return session
+
+
+def test_terminal_queries_split_across_reads_receive_priority_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = PexpectPosixPtyTransport()
+    session = _synthetic_session(transport)
+    chunks = iter((b"prefix\x1b[", b"5n-middle\x1b[6", b"n-suffix"))
+    writes: list[bytes] = []
+
+    monkeypatch.setattr(os, "read", lambda _fd, _size: next(chunks))
+
+    def record_write(_fd: int, data: bytes | memoryview) -> int:
+        payload = bytes(data)
+        writes.append(payload)
+        return len(payload)
+
+    monkeypatch.setattr(os, "write", record_write)
+
+    assert transport.read(session, 4096).data == b"prefix\x1b["
+    assert transport.read(session, 4096).data == b"5n-middle\x1b[6"
+    assert transport.read(session, 4096).data == b"n-suffix"
+    assert writes == [b"\x1b[0n", b"\x1b[1;1R"]
+
+
+def test_terminal_response_precedes_user_input_after_backpressure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = PexpectPosixPtyTransport()
+    session = _synthetic_session(transport)
+    writes: list[bytes] = []
+    response_blocked = True
+
+    monkeypatch.setattr(os, "read", lambda _fd, _size: b"\x1b[6n")
+
+    def record_write(_fd: int, data: bytes | memoryview) -> int:
+        nonlocal response_blocked
+        payload = bytes(data)
+        if response_blocked:
+            response_blocked = False
+            raise BlockingIOError(errno.EAGAIN, "injected terminal response backpressure")
+        writes.append(payload)
+        return len(payload)
+
+    monkeypatch.setattr(os, "write", record_write)
+
+    assert transport.read(session, 4096).data == b"\x1b[6n"
+    written = transport.write(session, memoryview(b"user-input"))
+    assert written.bytes_written == len(b"user-input")
+    assert not written.would_block
+    assert writes == [b"\x1b[1;1R", b"user-input"]
 
 
 def _write_all(

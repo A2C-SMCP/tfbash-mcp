@@ -134,6 +134,19 @@ class PowerShellDialect:
             + ";"
             + _write_static_record(protocol._launch_marker[1:-1].decode("ascii"))
         )
+        if not self._windows_paths:
+            prompt = _powershell_literal(protocol._prompt.decode("ascii"))
+            launch_script += (
+                ";& /bin/stty -echo -icanon min 1 time 0;"
+                "if($LASTEXITCODE -ne 0){throw 'failed to configure the POSIX terminal'};"
+                f"[Console]::Out.Write({prompt});"
+                "$__tf_input=[Console]::In.ReadLine();"
+                "while($null -ne $__tf_input){"
+                "try{. ([ScriptBlock]::Create($__tf_input))}"
+                "catch{[Console]::Error.WriteLine([string]$_)};"
+                f"[Console]::Out.Write({prompt});"
+                "$__tf_input=[Console]::In.ReadLine()}"
+            )
         launch = DialectLaunch(
             spawn=SpawnRequest(
                 executable=request.executable,
@@ -168,6 +181,7 @@ class PowerShellProtocol(DialectProtocol):
         self._token_factory = token_factory
         self._max_control_bytes = max_control_bytes
         self._windows_paths = windows_paths
+        self._line_ending = b"\r\n" if windows_paths else b"\n"
         self._prompt = f"__TFPWSH_PROMPT_{session_token}__> ".encode()
         self._launch_marker = (
             _RECORD_SEPARATOR + f"TFPWSH_LAUNCH_{session_token}".encode() + _UNIT_SEPARATOR
@@ -219,7 +233,7 @@ class PowerShellProtocol(DialectProtocol):
                 ),
             )
         )
-        return _encoded_invocation(script, self._session_token)
+        return _encoded_invocation(script, self._session_token, self._line_ending)
 
     def wrap_command(self, command: str) -> CommandFrame:
         if self._state is not _ParserState.READY or self._pending_command is not None:
@@ -252,7 +266,7 @@ class PowerShellProtocol(DialectProtocol):
                 ),
             )
         )
-        frame = CommandFrame(correlation_id, _encoded_invocation(script, token))
+        frame = CommandFrame(correlation_id, _encoded_invocation(script, token, self._line_ending))
         self._pending_command = _PendingCommand(correlation_id, begin_marker, result_prefix)
         self._state = _ParserState.WAITING_BEGIN
         return frame
@@ -266,7 +280,7 @@ class PowerShellProtocol(DialectProtocol):
             _RECORD_SEPARATOR + f"TFPWSH_RECOVER_BEGIN_{token}".encode() + _UNIT_SEPARATOR
         )
         result_prefix = _RECORD_SEPARATOR + f"TFPWSH_RECOVER_END_{token}:".encode()
-        input_bytes = f"{self._control_function} R {token}\r\n".encode("ascii")
+        input_bytes = f"{self._control_function} R {token}".encode("ascii") + self._line_ending
         self._pending_recovery = _PendingRecovery(
             pending.correlation_id,
             begin_marker,
@@ -292,7 +306,7 @@ class PowerShellProtocol(DialectProtocol):
         token = _validate_token(self._token_factory())
         correlation_id = f"finalize_{token}"
         marker = _RECORD_SEPARATOR + f"TFPWSH_FINALIZE_{token}".encode() + _UNIT_SEPARATOR
-        input_bytes = f"{self._control_function} F {token}\r\n".encode("ascii")
+        input_bytes = f"{self._control_function} F {token}".encode("ascii") + self._line_ending
         self._pending_finalization = _PendingFinalization(
             correlation_id,
             marker,
@@ -894,14 +908,15 @@ def _encoded_command(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _encoded_invocation(script: str, token: str) -> bytes:
+def _encoded_invocation(script: str, token: str, line_ending: bytes) -> bytes:
     payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
     sentinel = f"TFPWSH_INPUT_{token}"
-    return (
+    invocation = (
         f"$null={_powershell_literal(sentinel)};. ([ScriptBlock]::Create("
         "[Text.Encoding]::UTF8.GetString("
-        f"[Convert]::FromBase64String('{payload}'))))\r\n"
+        f"[Convert]::FromBase64String('{payload}'))))"
     ).encode("ascii")
+    return invocation + line_ending
 
 
 def _dot_source_utf8(script: str, status_target: str | None = None) -> str:

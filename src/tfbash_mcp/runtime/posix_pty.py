@@ -29,6 +29,12 @@ from tfbash_mcp.runtime.contracts import (
 )
 from tfbash_mcp.runtime.errors import TransportClosed, TransportError
 
+_TERMINAL_STATUS_QUERY = b"\x1b[5n"
+_CURSOR_POSITION_QUERY = b"\x1b[6n"
+_TERMINAL_STATUS_RESPONSE = b"\x1b[0n"
+_CURSOR_POSITION_RESPONSE = b"\x1b[1;1R"
+_MAX_TERMINAL_RESPONSE_BYTES = 64
+
 
 @runtime_checkable
 class PosixSpawnOwnership(ProcessOwnership, Protocol):
@@ -69,6 +75,9 @@ class PexpectPosixSession(RuntimeSession):
         self._closed = False
         self._close_lock = Lock()
         self._read_guard = Lock()
+        self._write_lock = Lock()
+        self._terminal_query_tail = b""
+        self._terminal_responses = bytearray()
 
     @property
     def session_id(self) -> str:
@@ -181,6 +190,9 @@ class PexpectPosixPtyTransport:
                 raise TransportError("failed to read POSIX PTY") from error
             if not data:
                 return TransportRead(ReadStatus.EOF)
+            with concrete._write_lock:
+                self._queue_terminal_responses(concrete, data)
+                self._flush_terminal_responses(concrete)
             return TransportRead(ReadStatus.DATA, data)
         finally:
             concrete._read_guard.release()
@@ -190,16 +202,20 @@ class PexpectPosixPtyTransport:
         self._require_open(concrete)
         if not data:
             return TransportWrite(bytes_written=0, would_block=False)
-        try:
-            written = os.write(concrete._file_descriptor, data)
-        except BlockingIOError:
-            return TransportWrite(bytes_written=0, would_block=True)
-        except OSError as error:
-            if error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+        with concrete._write_lock:
+            self._flush_terminal_responses(concrete)
+            if concrete._terminal_responses:
                 return TransportWrite(bytes_written=0, would_block=True)
-            if error.errno in {errno.EBADF, errno.EIO, errno.ENXIO, errno.EPIPE}:
-                raise TransportClosed("POSIX PTY no longer accepts input") from error
-            raise TransportError("failed to write POSIX PTY") from error
+            try:
+                written = os.write(concrete._file_descriptor, data)
+            except BlockingIOError:
+                return TransportWrite(bytes_written=0, would_block=True)
+            except OSError as error:
+                if error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                    return TransportWrite(bytes_written=0, would_block=True)
+                if error.errno in {errno.EBADF, errno.EIO, errno.ENXIO, errno.EPIPE}:
+                    raise TransportClosed("POSIX PTY no longer accepts input") from error
+                raise TransportError("failed to write POSIX PTY") from error
         return TransportWrite(bytes_written=written, would_block=written < len(data))
 
     def wait(
@@ -219,6 +235,9 @@ class PexpectPosixPtyTransport:
             mask |= select.POLLIN | select.POLLHUP | select.POLLERR
         if WaitInterest.WRITABLE in interests:
             mask |= select.POLLOUT
+        with concrete._write_lock:
+            if concrete._terminal_responses:
+                mask |= select.POLLOUT
         try:
             poller = select.poll()
             poller.register(concrete._file_descriptor, mask)
@@ -243,12 +262,56 @@ class PexpectPosixPtyTransport:
                 ready.add(WaitInterest.READABLE)
             if event_mask & select.POLLOUT and WaitInterest.WRITABLE in interests:
                 ready.add(WaitInterest.WRITABLE)
+            if event_mask & select.POLLOUT:
+                with concrete._write_lock:
+                    self._flush_terminal_responses(concrete)
             if event_mask & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
                 if WaitInterest.PROCESS_EXIT in interests:
                     ready.add(WaitInterest.PROCESS_EXIT)
                 if WaitInterest.READABLE in interests:
                     ready.add(WaitInterest.READABLE)
         return frozenset(ready)
+
+    @staticmethod
+    def _queue_terminal_responses(session: PexpectPosixSession, chunk: bytes) -> None:
+        combined = session._terminal_query_tail + chunk
+        cursor = 0
+        while cursor < len(combined):
+            candidates = [
+                (position, query, response)
+                for query, response in (
+                    (_TERMINAL_STATUS_QUERY, _TERMINAL_STATUS_RESPONSE),
+                    (_CURSOR_POSITION_QUERY, _CURSOR_POSITION_RESPONSE),
+                )
+                if (position := combined.find(query, cursor)) >= 0
+            ]
+            if not candidates:
+                break
+            position, query, response = min(candidates, key=lambda candidate: candidate[0])
+            if len(session._terminal_responses) + len(response) > _MAX_TERMINAL_RESPONSE_BYTES:
+                raise TransportError("POSIX terminal response buffer capacity exceeded")
+            session._terminal_responses.extend(response)
+            cursor = position + len(query)
+        session._terminal_query_tail = combined[-3:]
+
+    @staticmethod
+    def _flush_terminal_responses(session: PexpectPosixSession) -> None:
+        while session._terminal_responses:
+            try:
+                written = os.write(session._file_descriptor, session._terminal_responses)
+            except BlockingIOError:
+                return
+            except OSError as error:
+                if error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                    return
+                if error.errno in {errno.EBADF, errno.EIO, errno.ENXIO, errno.EPIPE}:
+                    raise TransportClosed(
+                        "POSIX PTY no longer accepts terminal responses"
+                    ) from error
+                raise TransportError("failed to answer a POSIX terminal query") from error
+            if written <= 0:
+                raise TransportError("POSIX terminal response write made no progress")
+            del session._terminal_responses[:written]
 
     def close(
         self,
