@@ -107,12 +107,6 @@ def build_shell_service(config: ShellRuntimeConfig) -> ShellToolService:
         cwd=probe_cwd,
         environment=environment,
         timeout_ms=config.shell_startup_timeout_ms,
-        admit=lambda candidate: _probe_managed_candidate(
-            candidate,
-            config=config,
-            cwd=probe_cwd,
-            environment=environment,
-        ),
     )
     host = create_host_config(
         host_profile=config.host_profile,
