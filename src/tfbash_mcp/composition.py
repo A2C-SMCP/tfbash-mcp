@@ -267,7 +267,10 @@ def _dialect(
             or (r"C:\Program Files\Git\bin\bash.exe" if windows else "/bin/bash"),
             windows_paths=windows,
             shell_prelude=(
-                "bind 'set enable-bracketed-paste off' 2>/dev/null || :; " if windows else ""
+                "stty -echo 2>/dev/null || :; "
+                "bind 'set enable-bracketed-paste off' 2>/dev/null || :; "
+                if windows
+                else ""
             ),
         )
     if dialect is RuntimeDialectName.ZSH:
