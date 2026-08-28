@@ -462,7 +462,7 @@ def test_cleanup_retries_transient_nonblocking_leader_reap(
 
     monkeypatch.setattr(supervisor, "_snapshot_before_deadline", lambda *_args: [])
     monkeypatch.setattr(supervisor, "_finalize_leader", lambda _ownership: next(attempts))
-    monkeypatch.setattr(posix_process_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
 
     result = supervisor.cleanup(ownership, deadline_ms=1_000)
 
