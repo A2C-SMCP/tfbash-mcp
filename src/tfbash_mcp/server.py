@@ -227,9 +227,7 @@ def _runtime_config_from_arguments(
         runtime_profile=RuntimeSelection(arguments.runtime_profile),
         operating_system=operating_system or platform.system(),
         process_cwd=process_cwd or os.getcwd(),
-        environment=(
-            dict(os.environ) if inherited_environment is None else inherited_environment
-        ),
+        environment=(dict(os.environ) if inherited_environment is None else inherited_environment),
         workspace_root=arguments.workspace_root,
         default_cwd=arguments.default_cwd,
         shell=arguments.shell,
@@ -290,6 +288,7 @@ def create_server(
         instructions=service.instructions,
         lifespan=lifespan,
     )
+
     @configured.list_tools()  # type: ignore[no-untyped-call,misc]
     async def list_tools() -> list[types.Tool]:
         return list(tool_definitions(service))
@@ -461,9 +460,7 @@ async def _run_stdio(configured: Server[ShellToolService, object]) -> None:
 async def _run_stdio_runtime(config: ShellRuntimeConfig) -> None:
     runtime = await EmbeddedShellRuntime._create_from_runtime_config(config)
     async with runtime:
-        await _run_stdio(
-            create_server(runtime._tool_service, shutdown_on_exit=False)
-        )
+        await _run_stdio(create_server(runtime._tool_service, shutdown_on_exit=False))
 
 
 def main(argv: Sequence[str] | None = None) -> None:

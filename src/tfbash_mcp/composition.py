@@ -92,9 +92,7 @@ def build_shell_service(config: ShellRuntimeConfig) -> ShellToolService:
         "linux": NativePlatform.LINUX,
     }.get(config.operating_system.casefold())
     if native_platform is None:
-        raise RuntimeConfigurationError(
-            f"unsupported operating system: {config.operating_system}"
-        )
+        raise RuntimeConfigurationError(f"unsupported operating system: {config.operating_system}")
     if (
         native_platform is NativePlatform.WINDOWS
         and platform.system().casefold() == "windows"
@@ -194,8 +192,7 @@ def build_shell_service(config: ShellRuntimeConfig) -> ShellToolService:
         agent_context=composition.agent_context(shell_version=shell_version),
         directory_exists=os.path.isdir,
         concurrency_limits=ToolConcurrencyLimits(
-            wait_threads=config.max_command_shells
-            * (config.max_read_waiters_per_execution + 2),
+            wait_threads=config.max_command_shells * (config.max_read_waiters_per_execution + 2),
             control_threads=config.max_command_shells * (config.max_pending_operations + 1),
             close_threads=config.max_command_shells,
             metadata_threads=config.max_command_shells + 1,

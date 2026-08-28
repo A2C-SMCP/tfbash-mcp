@@ -204,9 +204,7 @@ class EmbeddedShellRuntime:
                     shutdown_error = error
                 async with self._close_lock:
                     with self._state_lock:
-                        self._state = (
-                            "close_failed" if shutdown_error is not None else "closed"
-                        )
+                        self._state = "close_failed" if shutdown_error is not None else "closed"
                         completion.set()
                         if shutdown_error is not None:
                             self._close_complete = anyio.Event()
