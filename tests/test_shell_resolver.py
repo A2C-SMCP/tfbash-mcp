@@ -570,6 +570,8 @@ def test_no_compatible_shell_error_is_redacted() -> None:
             runner=lambda *args, **kwargs: (_ for _ in ()).throw(OSError(secret)),
         )
 
+    assert isinstance(captured.value.__cause__, OSError)
+
     assert secret not in str(captured.value)
     assert "OSError" in str(captured.value)
 

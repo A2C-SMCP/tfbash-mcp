@@ -62,6 +62,7 @@ def resolve_shell(
         else _discovered_candidates(selection, platform, environment)
     )
     failures: list[str] = []
+    last_error: Exception | None = None
     for candidate in _deduplicate(candidates):
         try:
             version, edition = _identity_probe(
@@ -106,10 +107,13 @@ def resolve_shell(
                 "shell candidate cleanup could not be proven; automatic routing stopped"
             ) from error
         except Exception as error:
+            last_error = error
             failures.append(f"{candidate.dialect.value}: {type(error).__name__}")
     requested = "automatic shell routing" if selection is RuntimeSelection.AUTO else selection.value
     detail = ", ".join(failures) if failures else "no candidates were discovered"
-    raise RuntimeConfigurationError(f"{requested} found no compatible native shell ({detail})")
+    raise RuntimeConfigurationError(
+        f"{requested} found no compatible native shell ({detail})"
+    ) from last_error
 
 
 def _explicit_candidate(
