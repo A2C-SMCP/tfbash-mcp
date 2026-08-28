@@ -13,6 +13,8 @@ import anyio
 import pytest
 from pydantic import AnyUrl
 
+import tfbash_mcp.composition as composition_module
+import tfbash_mcp.embedded as embedded_module
 import tfbash_mcp.server as server_module
 from tfbash_mcp.domain import (
     CommandShellManager,
@@ -123,6 +125,51 @@ def test_cli_has_no_language_specific_environment_metadata_options() -> None:
     assert "environment_name" not in destinations
 
 
+def test_stdio_entry_creates_the_shared_embedded_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object()
+    configured_server = object()
+    observed: list[object] = []
+
+    class FakeRuntime:
+        @property
+        def _tool_service(self) -> object:
+            return service
+
+        async def __aenter__(self) -> FakeRuntime:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            observed.append("closed")
+
+    async def fake_create(_config: object) -> FakeRuntime:
+        observed.append("created")
+        return FakeRuntime()
+
+    def fake_create_server(received: object, *, shutdown_on_exit: bool) -> object:
+        assert received is service
+        assert not shutdown_on_exit
+        return configured_server
+
+    async def fake_run_stdio(received: object) -> None:
+        assert received is configured_server
+        observed.append("served")
+
+    monkeypatch.setattr(
+        embedded_module.EmbeddedShellRuntime,
+        "_create_from_runtime_config",
+        staticmethod(fake_create),
+    )
+    monkeypatch.setattr(server_module, "create_server", fake_create_server)
+    monkeypatch.setattr(server_module, "_run_stdio", fake_run_stdio)
+
+    config = server_module._runtime_config_from_arguments(build_parser().parse_args([]))
+    anyio.run(server_module._run_stdio_runtime, config)
+
+    assert observed == ["created", "served", "closed"]
+
+
 def test_cli_cross_option_deadlines_are_validated() -> None:
     parser = build_parser()
     too_short_close = parser.parse_args(
@@ -177,7 +224,7 @@ def test_build_service_selects_the_production_windows_profile(
 ) -> None:
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
     monkeypatch.setattr(
-        server_module,
+        composition_module,
         "resolve_shell",
         lambda *args, **kwargs: _test_resolution(windows=True),
     )
@@ -262,7 +309,7 @@ def test_managed_probe_requires_exact_contract_and_always_cleans_up(
         def shutdown(self) -> None:
             shutdown.append(True)
 
-    monkeypatch.setattr(server_module, "CommandShellManager", FakeManager)
+    monkeypatch.setattr(composition_module, "CommandShellManager", FakeManager)
 
     with pytest.raises(RuntimeConfigurationError, match="managed shell capability"):
         _probe_managed_candidate(
@@ -302,7 +349,7 @@ def test_managed_probe_cleanup_failure_is_fail_closed(
         def shutdown(self) -> None:
             shutdown.append(True)
 
-    monkeypatch.setattr(server_module, "CommandShellManager", FakeManager)
+    monkeypatch.setattr(composition_module, "CommandShellManager", FakeManager)
 
     with pytest.raises(RoutingCleanupError, match="cleanup failed"):
         _probe_managed_candidate(
@@ -343,7 +390,7 @@ def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor
 ) -> None:
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
     monkeypatch.setattr(
-        server_module,
+        composition_module,
         "resolve_shell",
         lambda *args, **kwargs: _test_resolution(),
     )
@@ -371,7 +418,7 @@ def test_saturated_wait_lane_cannot_starve_close_control(
 ) -> None:
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
     monkeypatch.setattr(
-        server_module,
+        composition_module,
         "resolve_shell",
         lambda *args, **kwargs: _test_resolution(),
     )

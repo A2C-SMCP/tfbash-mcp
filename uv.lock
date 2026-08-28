@@ -844,6 +844,7 @@ name = "tfbash-mcp"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "pexpect" },
@@ -865,6 +866,7 @@ windows-lab = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.5.0,<5.0.0" },
     { name = "jsonschema", specifier = ">=4.25.0,<5.0.0" },
     { name = "mcp", specifier = ">=1.29.0,<2.0.0" },
     { name = "pexpect", specifier = ">=4.9.0,<5.0.0" },

@@ -1,4 +1,4 @@
-"""Immutable HostConfig and the process-level Runtime Profile selector."""
+"""Immutable HostConfig and the runtime-instance profile selector."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class HostProfile(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class HostConfig:
-    """Process-frozen host inputs, kept outside every Runtime Port."""
+    """Instance-frozen host inputs, kept outside every Runtime Port."""
 
     host_profile: HostProfile
     platform: NativePlatform

@@ -7,8 +7,9 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
+import anyio
 from mcp import types
 from pydantic import BaseModel
 
@@ -44,6 +45,7 @@ from tfbash_mcp.protocol import (
     ToolName,
     make_error,
     model_to_wire,
+    tool_contract_schemas,
     validate_tool_input,
     validate_tool_output,
 )
@@ -64,6 +66,16 @@ _LOGGER = logging.getLogger(__name__)
 SHELL_OVERVIEW_URI = "window://io.github.a2c-smcp.tfbash/shell-overview"
 SHELL_OVERVIEW_OUTPUT_CHARACTERS = 500
 
+TOOL_TAGS: dict[ToolName, tuple[str, ...]] = {
+    ToolName.SHELL_OPEN: ("BuildIn", "Create"),
+    ToolName.SHELL_EXEC: ("BuildIn", "Create", "Read", "Update", "Delete"),
+    ToolName.SHELL_READ: ("BuildIn", "Read"),
+    ToolName.SHELL_WRITE: ("BuildIn", "Create", "Read", "Update", "Delete"),
+    ToolName.SHELL_SIGNAL: ("BuildIn", "Update"),
+    ToolName.SHELL_LIST: ("BuildIn", "Read"),
+    ToolName.SHELL_CLOSE: ("BuildIn", "Delete"),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ToolConcurrencyLimits:
@@ -83,6 +95,25 @@ class ToolConcurrencyLimits:
             <= 0
         ):
             raise ValueError("tool thread limits must be positive")
+
+
+class ToolConcurrencyBudget:
+    """Thread budget shareable by runtimes on one AnyIO backend/event loop."""
+
+    def __init__(self, limits: ToolConcurrencyLimits) -> None:
+        self._wait = anyio.CapacityLimiter(limits.wait_threads)
+        self._control = anyio.CapacityLimiter(limits.control_threads)
+        self._close = anyio.CapacityLimiter(limits.close_threads)
+        self._metadata = anyio.CapacityLimiter(limits.metadata_threads)
+
+    def limiter_for(self, tool: ToolName) -> anyio.CapacityLimiter:
+        if tool in {ToolName.SHELL_OPEN, ToolName.SHELL_EXEC, ToolName.SHELL_READ}:
+            return self._wait
+        if tool in {ToolName.SHELL_WRITE, ToolName.SHELL_SIGNAL}:
+            return self._control
+        if tool is ToolName.SHELL_CLOSE:
+            return self._close
+        return self._metadata
 
 
 class ShellManager(Protocol):
@@ -351,6 +382,62 @@ class ShellToolService:
                 **details,
             )
         return None
+
+
+def tool_definitions(service: ShellToolService) -> tuple[types.Tool, ...]:
+    """Build fresh public MCP tool definitions from the shared V1 contracts."""
+
+    contracts = tool_contract_schemas(service.protocol_config)
+    _redact_sensitive_schema_defaults(contracts)
+    descriptions = service.tool_descriptions
+    return tuple(
+        types.Tool(
+            name=tool.value,
+            description=descriptions[tool.value],
+            inputSchema=cast(dict[str, Any], contracts[tool.value]["inputSchema"]),
+            outputSchema=cast(dict[str, Any], contracts[tool.value]["outputSchema"]),
+            _meta={
+                "tfbash-mcp/errorSchema": cast(
+                    dict[str, Any], contracts[tool.value]["errorSchema"]
+                ),
+                "a2c_tool_meta": {"tags": list(TOOL_TAGS[tool])},
+            },
+        )
+        for tool in ToolName
+    )
+
+
+async def call_tool_async(
+    service: ShellToolService,
+    name: str,
+    arguments: dict[str, object],
+    budget: ToolConcurrencyBudget,
+) -> types.CallToolResult:
+    """Run one synchronous Domain call without blocking the host event loop."""
+
+    try:
+        tool = ToolName(name)
+    except ValueError:
+        tool = ToolName.SHELL_LIST
+    return await anyio.to_thread.run_sync(
+        service.call,
+        name,
+        arguments,
+        abandon_on_cancel=True,
+        limiter=budget.limiter_for(tool),
+    )
+
+
+def _redact_sensitive_schema_defaults(
+    contracts: dict[str, dict[str, dict[str, object]]],
+) -> None:
+    open_input = contracts[ToolName.SHELL_OPEN.value]["inputSchema"]
+    properties = open_input.get("properties")
+    if not isinstance(properties, dict):
+        raise RuntimeConfigurationError("shell_open schema has no properties")
+    startup_schema = properties.get("startup_command")
+    if isinstance(startup_schema, dict):
+        startup_schema.pop("default", None)
 
 
 def _execution_to_wire(snapshot: DomainExecutionSnapshot) -> dict[str, object]:

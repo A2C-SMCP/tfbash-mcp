@@ -10,7 +10,7 @@ import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from threading import Event, Lock
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 import anyio
 from mcp import types
@@ -21,63 +21,49 @@ from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from tfbash_mcp import __version__
-from tfbash_mcp.domain import CommandShellManager, ManagerConfig, WorkerConfig
+from tfbash_mcp.composition import (
+    ShellRuntimeConfig,
+    build_shell_service,
+)
+from tfbash_mcp.composition import (
+    _build_posix_runtime as _composition_build_posix_runtime,
+)
+from tfbash_mcp.composition import (
+    _build_windows_runtime as _composition_build_windows_runtime,
+)
+from tfbash_mcp.composition import (
+    _probe_managed_candidate as _composition_probe_managed_candidate,
+)
+from tfbash_mcp.embedded import EmbeddedShellRuntime
 from tfbash_mcp.mcp_adapter import (
     SHELL_OVERVIEW_URI,
     ShellToolService,
-    ToolConcurrencyLimits,
+    ToolConcurrencyBudget,
+    call_tool_async,
+    tool_definitions,
 )
-from tfbash_mcp.protocol import (
-    DialectName as ProtocolDialectName,
+from tfbash_mcp.mcp_adapter import (
+    _redact_sensitive_schema_defaults as _adapter_redact_sensitive_schema_defaults,
 )
-from tfbash_mcp.protocol import (
-    PlatformName,
-    ProtocolConfig,
-    ToolName,
-    tool_contract_schemas,
-)
+from tfbash_mcp.protocol import ToolName
 from tfbash_mcp.runtime import (
-    BashDialect,
-    ConPtyTransport,
     HostProfile,
-    NativePlatform,
-    NativeRuntimeProfile,
-    PexpectPosixPtyTransport,
-    PosixBashProfile,
-    PosixProcessSupervisor,
-    PowerShellDialect,
-    RuntimeBuilders,
     RuntimeConfigurationError,
     RuntimeName,
-    RuntimePlatform,
-    RuntimeProfile,
     RuntimeSelection,
     ShellResolution,
-    ShellStartRequest,
-    WindowsProcessSupervisor,
-    WindowsPwshProfile,
-    ZshDialect,
-    compose_runtime,
-    create_host_config,
-    resolve_shell,
 )
-from tfbash_mcp.runtime.contracts import DialectName as RuntimeDialectName
-from tfbash_mcp.runtime.resolver import RoutingCleanupError, native_paths_equal
 
 # Inert descriptor retained for import-time discovery. ``main`` builds the
 # configured process instance only after CLI and host validation succeed.
 server = Server("tfbash-mcp", version=__version__)
 
 _OVERVIEW_NOTIFICATION_DEBOUNCE_SECONDS = 0.1
-_TOOL_TAGS: dict[ToolName, tuple[str, ...]] = {
-    ToolName.SHELL_OPEN: ("BuildIn", "Create"),
-    ToolName.SHELL_EXEC: ("BuildIn", "Create", "Read", "Update", "Delete"),
-    ToolName.SHELL_READ: ("BuildIn", "Read"),
-    ToolName.SHELL_WRITE: ("BuildIn", "Create", "Read", "Update", "Delete"),
-    ToolName.SHELL_SIGNAL: ("BuildIn", "Update"),
-    ToolName.SHELL_LIST: ("BuildIn", "Read"),
-    ToolName.SHELL_CLOSE: ("BuildIn", "Delete"),
-}
+
+# Private compatibility exports retained for existing integrators and tests.
+_build_posix_runtime = _composition_build_posix_runtime
+_build_windows_runtime = _composition_build_windows_runtime
+_redact_sensitive_schema_defaults = _adapter_redact_sensitive_schema_defaults
 
 
 class _ResourceUpdateSession(Protocol):
@@ -217,135 +203,66 @@ def build_service(
     process_cwd: str | None = None,
     inherited_environment: dict[str, str] | None = None,
 ) -> ShellToolService:
-    """Freeze host inputs and build one complete runtime before serving MCP."""
+    """Compatibility wrapper around the shared stdio/embedded composition root."""
 
-    _validate_cross_option_constraints(arguments)
-    os_name = operating_system or platform.system()
-    cwd = process_cwd or os.getcwd()
-    environment = dict(os.environ) if inherited_environment is None else inherited_environment
-    if HostProfile(arguments.host_profile) is HostProfile.IDE and arguments.workspace_root is None:
-        raise RuntimeConfigurationError("IDE hosts must provide workspace_root")
-    probe_cwd = arguments.default_cwd or arguments.workspace_root or cwd
-    if not os.path.isdir(probe_cwd):
-        raise RuntimeConfigurationError("default_cwd must be an existing native absolute directory")
-    native_platform = {
-        "windows": NativePlatform.WINDOWS,
-        "darwin": NativePlatform.MACOS,
-        "linux": NativePlatform.LINUX,
-    }.get(os_name.casefold())
-    if native_platform is None:
-        raise RuntimeConfigurationError(f"unsupported operating system: {os_name}")
-    if (
-        native_platform is NativePlatform.WINDOWS
-        and platform.system().casefold() == "windows"
-        and platform.machine().casefold() not in {"amd64", "x86_64"}
-    ):
-        raise RuntimeConfigurationError("Windows runtime currently requires an x64 process")
-    resolution = resolve_shell(
-        RuntimeSelection(arguments.runtime_profile),
-        platform=native_platform,
-        explicit_shell=arguments.shell,
-        cwd=probe_cwd,
-        environment=environment,
-        timeout_ms=arguments.shell_startup_timeout_ms,
-        admit=lambda candidate: _probe_managed_candidate(
-            candidate,
-            arguments=arguments,
-            cwd=probe_cwd,
-            environment=environment,
-        ),
+    return build_shell_service(
+        _runtime_config_from_arguments(
+            arguments,
+            operating_system=operating_system,
+            process_cwd=process_cwd,
+            inherited_environment=inherited_environment,
+        )
     )
-    host = create_host_config(
+
+
+def _runtime_config_from_arguments(
+    arguments: argparse.Namespace,
+    *,
+    operating_system: str | None = None,
+    process_cwd: str | None = None,
+    inherited_environment: dict[str, str] | None = None,
+) -> ShellRuntimeConfig:
+    return ShellRuntimeConfig(
         host_profile=HostProfile(arguments.host_profile),
-        runtime_selection=RuntimeSelection(arguments.runtime_profile),
-        operating_system=os_name,
-        process_cwd=cwd,
-        inherited_environment=environment,
+        runtime_profile=RuntimeSelection(arguments.runtime_profile),
+        operating_system=operating_system or platform.system(),
+        process_cwd=process_cwd or os.getcwd(),
+        environment=(
+            dict(os.environ) if inherited_environment is None else inherited_environment
+        ),
         workspace_root=arguments.workspace_root,
         default_cwd=arguments.default_cwd,
-        default_shell=resolution.executable,
+        shell=arguments.shell,
         startup_command=arguments.startup_command,
-        resolved_runtime=resolution.runtime,
-        directory_exists=os.path.isdir,
-    )
-    composition = compose_runtime(
-        host,
-        RuntimeBuilders(
-            posix_bash=lambda: _build_posix_runtime(
-                shutdown_grace_ms=arguments.shutdown_grace_ms,
-                dialect=resolution.dialect,
-                executable=resolution.executable,
-            ),
-            windows_pwsh=lambda: _build_windows_runtime(
-                shutdown_grace_ms=arguments.shutdown_grace_ms,
-                close_timeout_ms=arguments.close_timeout_ms,
-                shell_startup_timeout_ms=arguments.shell_startup_timeout_ms,
-                max_read_buffer_bytes=arguments.output_buffer_bytes,
-                max_write_buffer_bytes=arguments.max_pending_write_bytes,
-                dialect=resolution.dialect,
-                executable=resolution.executable,
-            ),
-        ),
-    )
-    executable = host.default_shell or composition.runtime.dialect.default_executable
-    shell_version = resolution.version + (f" ({resolution.edition})" if resolution.edition else "")
-    protocol_config = ProtocolConfig(
-        platform=PlatformName(host.platform.value),
-        dialect=ProtocolDialectName(resolution.dialect.value),
-        default_cwd=host.default_cwd,
-        shell=executable,
-        startup_command=host.startup_command,
+        shell_startup_timeout_ms=arguments.shell_startup_timeout_ms,
         command_yield_ms=arguments.command_yield_ms,
         command_timeout_ms=arguments.command_timeout_ms,
+        recovery_grace_ms=arguments.recovery_grace_ms,
+        job_cleanup_timeout_ms=arguments.job_cleanup_timeout_ms,
+        output_quiet_ms=arguments.output_quiet_ms,
         max_command_bytes=arguments.max_command_bytes,
+        max_command_shells=arguments.max_command_shells,
+        max_retained_executions=arguments.max_retained_executions,
         output_buffer_bytes=arguments.output_buffer_bytes,
         max_read_bytes=arguments.max_read_bytes,
+        max_read_waiters_per_execution=arguments.max_read_waiters_per_execution,
         max_write_bytes=arguments.max_write_bytes,
-    )
-    worker_config = WorkerConfig(
-        startup_deadline_ms=arguments.shell_startup_timeout_ms,
-        recovery_deadline_ms=arguments.recovery_grace_ms,
-        cleanup_deadline_ms=arguments.close_timeout_ms,
-        job_cleanup_deadline_ms=arguments.job_cleanup_timeout_ms,
-        output_quiet_ms=arguments.output_quiet_ms,
-        operation_deadline_ms=arguments.close_timeout_ms,
-        rebuild_deadline_ms=arguments.shell_startup_timeout_ms,
         max_pending_operations=arguments.max_pending_operations,
         max_pending_write_bytes=arguments.max_pending_write_bytes,
-    )
-    manager = CommandShellManager(
-        profile=composition.runtime,
-        config=ManagerConfig(
-            max_shells=arguments.max_command_shells,
-            max_retained_executions=arguments.max_retained_executions,
-            completed_retention_ms=arguments.completed_retention_ms,
-            max_output_bytes=arguments.output_buffer_bytes,
-            max_read_bytes=arguments.max_read_bytes,
-            max_write_bytes=arguments.max_write_bytes,
-            max_read_waiters_per_execution=arguments.max_read_waiters_per_execution,
-            worker=worker_config,
-        ),
-    )
-    return ShellToolService(
-        manager=manager,
-        composition=composition,
-        protocol_config=protocol_config,
-        agent_context=composition.agent_context(shell_version=shell_version),
-        directory_exists=os.path.isdir,
-        concurrency_limits=ToolConcurrencyLimits(
-            wait_threads=arguments.max_command_shells
-            * (arguments.max_read_waiters_per_execution + 2),
-            control_threads=arguments.max_command_shells * (arguments.max_pending_operations + 1),
-            close_threads=arguments.max_command_shells,
-            metadata_threads=arguments.max_command_shells + 1,
-        ),
+        completed_retention_ms=arguments.completed_retention_ms,
+        shutdown_grace_ms=arguments.shutdown_grace_ms,
+        close_timeout_ms=arguments.close_timeout_ms,
     )
 
 
-def create_server(service: ShellToolService) -> Server[ShellToolService, object]:
+def create_server(
+    service: ShellToolService,
+    *,
+    shutdown_on_exit: bool = True,
+) -> Server[ShellToolService, object]:
     """Register exact V1 contracts and one unified shutdown lifespan."""
 
-    tool_limiters = _create_tool_limiters(service)
+    tool_budget = ToolConcurrencyBudget(service.concurrency_limits)
     shutdown_limiter = anyio.CapacityLimiter(1)
     overview_hub = _OverviewSubscriptionHub()
 
@@ -360,11 +277,12 @@ def create_server(service: ShellToolService) -> Server[ShellToolService, object]
                 finally:
                     overview_hub.stop()
         finally:
-            with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(
-                    service.shutdown,
-                    limiter=shutdown_limiter,
-                )
+            if shutdown_on_exit:
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(
+                        service.shutdown,
+                        limiter=shutdown_limiter,
+                    )
 
     configured = _ShellOverviewServer(
         "tfbash-mcp",
@@ -372,31 +290,13 @@ def create_server(service: ShellToolService) -> Server[ShellToolService, object]
         instructions=service.instructions,
         lifespan=lifespan,
     )
-    contracts = tool_contract_schemas(service.protocol_config)
-    _redact_sensitive_schema_defaults(contracts)
-    descriptions = service.tool_descriptions
-
     @configured.list_tools()  # type: ignore[no-untyped-call,misc]
     async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=tool.value,
-                description=descriptions[tool.value],
-                inputSchema=cast(dict[str, Any], contracts[tool.value]["inputSchema"]),
-                outputSchema=cast(dict[str, Any], contracts[tool.value]["outputSchema"]),
-                _meta={
-                    "tfbash-mcp/errorSchema": cast(
-                        dict[str, Any], contracts[tool.value]["errorSchema"]
-                    ),
-                    "a2c_tool_meta": {"tags": list(_TOOL_TAGS[tool])},
-                },
-            )
-            for tool in ToolName
-        ]
+        return list(tool_definitions(service))
 
     @configured.call_tool(validate_input=False)  # type: ignore[misc]
     async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolResult:
-        return await _run_tool_call(service, name, arguments, tool_limiters)
+        return await call_tool_async(service, name, arguments, tool_budget)
 
     @configured.list_resources()  # type: ignore[no-untyped-call,misc]
     async def list_resources() -> list[types.Resource]:
@@ -485,92 +385,6 @@ async def _run_tool_call(
     )
 
 
-def _build_posix_runtime(
-    *,
-    shutdown_grace_ms: int = 3000,
-    dialect: RuntimeDialectName = RuntimeDialectName.BASH,
-    executable: str | None = None,
-) -> RuntimeProfile:
-    shell_dialect = _dialect(dialect, executable=executable, windows=False)
-    transport = PexpectPosixPtyTransport()
-    supervisor = PosixProcessSupervisor(shutdown_grace_ms=shutdown_grace_ms)
-    if dialect is RuntimeDialectName.BASH:
-        return PosixBashProfile(
-            dialect=shell_dialect,
-            transport=transport,
-            supervisor=supervisor,
-        )
-    return NativeRuntimeProfile(
-        name=RuntimeName.POSIX_BASH,
-        platform=RuntimePlatform.POSIX,
-        dialect=shell_dialect,
-        transport=transport,
-        supervisor=supervisor,
-    )
-
-
-def _build_windows_runtime(
-    *,
-    shutdown_grace_ms: int = 3000,
-    close_timeout_ms: int = 5000,
-    shell_startup_timeout_ms: int = 30_000,
-    max_read_buffer_bytes: int = 4 * 1024 * 1024,
-    max_write_buffer_bytes: int = 256 * 1024,
-    dialect: RuntimeDialectName = RuntimeDialectName.PWSH,
-    executable: str | None = None,
-) -> RuntimeProfile:
-    shell_dialect = _dialect(dialect, executable=executable, windows=True)
-    transport = ConPtyTransport(
-        max_read_buffer_bytes=max_read_buffer_bytes,
-        max_write_buffer_bytes=max_write_buffer_bytes,
-        close_timeout_ms=close_timeout_ms,
-    )
-    supervisor = WindowsProcessSupervisor(
-        terminate_grace_ms=shutdown_grace_ms,
-        attach_cleanup_timeout_ms=close_timeout_ms,
-        gate_wait_timeout_ms=shell_startup_timeout_ms,
-        shell_ready_timeout_ms=shell_startup_timeout_ms,
-    )
-    if dialect is RuntimeDialectName.PWSH:
-        return WindowsPwshProfile(
-            dialect=shell_dialect,
-            transport=transport,
-            supervisor=supervisor,
-        )
-    return NativeRuntimeProfile(
-        name=RuntimeName.WINDOWS_PWSH,
-        platform=RuntimePlatform.WINDOWS,
-        dialect=shell_dialect,
-        transport=transport,
-        supervisor=supervisor,
-    )
-
-
-def _dialect(
-    dialect: RuntimeDialectName,
-    *,
-    executable: str | None,
-    windows: bool,
-) -> BashDialect | ZshDialect | PowerShellDialect:
-    if dialect is RuntimeDialectName.BASH:
-        return BashDialect(
-            default_executable=executable
-            or (r"C:\Program Files\Git\bin\bash.exe" if windows else "/bin/bash"),
-            windows_paths=windows,
-        )
-    if dialect is RuntimeDialectName.ZSH:
-        return ZshDialect(
-            default_executable=executable
-            or (r"C:\msys64\usr\bin\zsh.exe" if windows else "/bin/zsh"),
-            windows_paths=windows,
-        )
-    return PowerShellDialect(
-        default_executable=executable
-        or (r"C:\Program Files\PowerShell\7\pwsh.exe" if windows else "/usr/bin/pwsh"),
-        windows_paths=windows,
-    )
-
-
 def _probe_managed_candidate(
     resolution: ShellResolution,
     *,
@@ -578,117 +392,18 @@ def _probe_managed_candidate(
     cwd: str,
     environment: dict[str, str],
 ) -> None:
-    """Admit one candidate through the real managed PTY/ConPTY lifecycle."""
-
-    windows = resolution.runtime is RuntimeName.WINDOWS_PWSH
-    profile = (
-        _build_windows_runtime(
-            shutdown_grace_ms=arguments.shutdown_grace_ms,
-            close_timeout_ms=arguments.close_timeout_ms,
-            shell_startup_timeout_ms=arguments.shell_startup_timeout_ms,
-            max_read_buffer_bytes=arguments.output_buffer_bytes,
-            max_write_buffer_bytes=arguments.max_pending_write_bytes,
-            dialect=resolution.dialect,
-            executable=resolution.executable,
-        )
-        if windows
-        else _build_posix_runtime(
-            shutdown_grace_ms=arguments.shutdown_grace_ms,
-            dialect=resolution.dialect,
-            executable=resolution.executable,
-        )
-    )
-    probe_environment = dict(environment)
-    probe_environment["TFBASH_MANAGED_PROBE"] = "环境中文🙂"
-    manager = CommandShellManager(
-        profile=profile,
-        config=ManagerConfig(
-            max_shells=1,
-            max_retained_executions=1,
-            completed_retention_ms=1_000,
-            max_output_bytes=65_536,
-            max_read_bytes=65_536,
-            max_write_bytes=65_536,
-            max_read_waiters_per_execution=1,
-            worker=WorkerConfig(
-                startup_deadline_ms=arguments.shell_startup_timeout_ms,
-                recovery_deadline_ms=arguments.recovery_grace_ms,
-                cleanup_deadline_ms=arguments.close_timeout_ms,
-                job_cleanup_deadline_ms=arguments.job_cleanup_timeout_ms,
-                output_quiet_ms=arguments.output_quiet_ms,
-                operation_deadline_ms=arguments.close_timeout_ms,
-                rebuild_deadline_ms=arguments.shell_startup_timeout_ms,
-                max_pending_operations=8,
-                max_pending_write_bytes=65_536,
-            ),
+    operating_system = "Windows" if resolution.runtime is RuntimeName.WINDOWS_PWSH else "Linux"
+    _composition_probe_managed_candidate(
+        resolution,
+        config=_runtime_config_from_arguments(
+            arguments,
+            operating_system=operating_system,
+            process_cwd=cwd,
+            inherited_environment=environment,
         ),
+        cwd=cwd,
+        environment=environment,
     )
-    shell_id: str | None = None
-    try:
-        opened = manager.open_shell(
-            ShellStartRequest(
-                executable=resolution.executable,
-                cwd=cwd,
-                environment=probe_environment,
-                # User startup commands are intentionally outside candidate admission:
-                # they run unchanged only when a requested Shell is opened/rebuilt.
-                startup_command=None,
-            )
-        )
-        shell_id = opened.shell_id
-        marker = "TFBASH_MANAGED_中文🙂"
-        if resolution.dialect is RuntimeDialectName.PWSH:
-            native_exit = "& $env:ComSpec /d /c exit 37" if windows else "& /bin/sh -c 'exit 37'"
-            command = (
-                f"Write-Output '{marker}'; Write-Output 'line1'; Write-Output 'line2'; "
-                "Write-Output $env:TFBASH_MANAGED_PROBE; "
-                f"{native_exit}"
-            )
-        else:
-            command = f"printf '%s\\n' '{marker}' line1 line2 \"$TFBASH_MANAGED_PROBE\"; (exit 37)"
-        result = manager.exec(
-            shell_id,
-            command,
-            yield_ms=arguments.shell_startup_timeout_ms,
-            timeout_ms=arguments.shell_startup_timeout_ms,
-            max_output_bytes=65_536,
-        )
-        expected_output = [marker, "line1", "line2", "环境中文🙂"]
-        actual_output = result.output.splitlines()
-        if (
-            result.status.value != "exited"
-            or result.exit_code != 37
-            or result.cwd is None
-            or not native_paths_equal(result.cwd, cwd, windows=windows)
-            or actual_output != expected_output
-        ):
-            raise RuntimeConfigurationError("managed shell capability probe failed")
-    finally:
-        cleanup_error: Exception | None = None
-        try:
-            if shell_id is not None:
-                manager.close_shell(shell_id)
-        except Exception as error:
-            cleanup_error = error
-        try:
-            manager.shutdown()
-        except Exception as error:
-            cleanup_error = cleanup_error or error
-        if cleanup_error is not None:
-            raise RoutingCleanupError("managed candidate cleanup failed") from cleanup_error
-
-
-def _redact_sensitive_schema_defaults(
-    contracts: dict[str, dict[str, dict[str, object]]],
-) -> None:
-    open_input = contracts[ToolName.SHELL_OPEN.value]["inputSchema"]
-    properties = open_input.get("properties")
-    if not isinstance(properties, dict):
-        raise RuntimeConfigurationError("shell_open schema has no properties")
-    for name in ("startup_command",):
-        field_schema = properties.get(name)
-        if isinstance(field_schema, dict):
-            field_schema.pop("default", None)
 
 
 def _probe_shell_version(
@@ -743,17 +458,23 @@ async def _run_stdio(configured: Server[ShellToolService, object]) -> None:
         )
 
 
+async def _run_stdio_runtime(config: ShellRuntimeConfig) -> None:
+    runtime = await EmbeddedShellRuntime._create_from_runtime_config(config)
+    async with runtime:
+        await _run_stdio(
+            create_server(runtime._tool_service, shutdown_on_exit=False)
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Validate configuration, then serve MCP until stdin EOF or cancellation."""
 
     parser = build_parser()
     arguments = parser.parse_args(argv)
     try:
-        service = build_service(arguments)
+        anyio.run(_run_stdio_runtime, _runtime_config_from_arguments(arguments))
     except (RuntimeConfigurationError, ValueError) as error:
         parser.error(str(error))
-    try:
-        anyio.run(_run_stdio, create_server(service))
     except KeyboardInterrupt:
         return
 

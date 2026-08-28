@@ -11,6 +11,7 @@ Server 2025 上执行；Windows release 判定还必须引用真实 Windows 11 C
 |---|---|---|
 | 七工具严格 schema、输入输出 union、错误与平台约束 | `tests/test_protocol.py`、`tests/test_mcp_adapter.py` | 三平台共享测试 |
 | MCP initialize、七工具 discovery/call、异步取消与 stdio shutdown | `tests/test_mcp_stdio.py::test_stdio_initialize_lists_and_calls_the_seven_tools`、`test_cancelling_an_inflight_long_call_does_not_block_stdio_shutdown` | 三平台共享测试 |
+| Python 嵌入 API、事件循环非阻塞、配置快照、取消清理、双实例隔离与幂等/可重试关闭 | `tests/test_embedded.py::test_embedded_create_does_not_block_the_host_event_loop`、`test_cancelling_embedded_create_cleans_the_built_service`、`test_cancelled_embedded_call_does_not_block_runtime_close`、`test_embedded_close_is_concurrent_idempotent_and_retryable`、`test_two_real_embedded_runtimes_keep_project_state_isolated` | POSIX 真实 PTY；Windows hosted CI 使用原生 ConPTY |
 | Shell Overview Resource、订阅通知、Unicode 尾部输出与工具 tags | `tests/test_domain_output.py`、`tests/test_domain_registry.py`、`tests/test_mcp_adapter.py`、`tests/test_mcp_stdio.py::test_stdio_initialize_lists_and_calls_the_seven_tools` | 三平台共享测试；真实 stdio MCP 会话 |
 | Domain 不含平台实现；两个 Profile 服从相同 ports | `tests/test_runtime_contracts.py`、`tests/test_shell_manager.py::test_both_runtime_profiles_reuse_the_same_manager_worker`、`test_worker_has_no_platform_implementation_imports` | 三平台共享测试与 test doubles |
 | 多 Shell、状态、cursor/ring buffer、stdin、配额、并发、close/shutdown | `tests/test_domain_*.py`、`tests/test_shell_manager.py` | 常规 `Tests` workflow；关键跨层用例进入三平台矩阵 |
