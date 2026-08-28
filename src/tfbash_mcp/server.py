@@ -62,7 +62,7 @@ from tfbash_mcp.runtime import (
     resolve_shell,
 )
 from tfbash_mcp.runtime.contracts import DialectName as RuntimeDialectName
-from tfbash_mcp.runtime.resolver import RoutingCleanupError
+from tfbash_mcp.runtime.resolver import RoutingCleanupError, native_paths_equal
 
 # Inert descriptor retained for import-time discovery. ``main`` builds the
 # configured process instance only after CLI and host validation succeed.
@@ -638,10 +638,11 @@ def _probe_managed_candidate(
         shell_id = opened.shell_id
         marker = "TFBASH_MANAGED_中文🙂"
         if resolution.dialect is RuntimeDialectName.PWSH:
+            native_exit = "& $env:ComSpec /d /c exit 37" if windows else "& /bin/sh -c 'exit 37'"
             command = (
                 f"Write-Output '{marker}'; Write-Output 'line1'; Write-Output 'line2'; "
                 "Write-Output $env:TFBASH_MANAGED_PROBE; "
-                "$global:LASTEXITCODE=37; throw 'managed capability exit'"
+                f"{native_exit}"
             )
         else:
             command = f"printf '%s\\n' '{marker}' line1 line2 \"$TFBASH_MANAGED_PROBE\"; (exit 37)"
@@ -652,12 +653,14 @@ def _probe_managed_candidate(
             timeout_ms=arguments.shell_startup_timeout_ms,
             max_output_bytes=65_536,
         )
-        required = (marker, "line1", "line2", "环境中文🙂")
+        expected_output = [marker, "line1", "line2", "环境中文🙂"]
+        actual_output = result.output.splitlines()
         if (
             result.status.value != "exited"
             or result.exit_code != 37
             or result.cwd is None
-            or any(value not in result.output for value in required)
+            or not native_paths_equal(result.cwd, cwd, windows=windows)
+            or actual_output != expected_output
         ):
             raise RuntimeConfigurationError("managed shell capability probe failed")
     finally:

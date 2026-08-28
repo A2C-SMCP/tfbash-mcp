@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from tfbash_mcp.mcp_adapter import SHELL_OVERVIEW_URI
+from tfbash_mcp.runtime.resolver import native_paths_equal
 from tfbash_mcp.server import build_parser, build_service
 
 EXPECTED_TOOL_TAGS = {
@@ -643,33 +645,180 @@ def test_stdio_uses_the_production_windows_profile_end_to_end() -> None:
     anyio.run(scenario)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a native POSIX PTY")
+def test_posix_auto_prefers_the_platform_system_shell(tmp_path: Path) -> None:
+    expected_dialect = "zsh" if sys.platform == "darwin" else "bash"
+    probe_cwd = tmp_path / "auto-探针"
+    probe_cwd.mkdir()
+    probe_environment = {**os.environ, "TFBASH_REAL_PROBE": "环境值🙂"}
+    service = build_service(
+        build_parser().parse_args(["--runtime-profile", "auto", "--default-cwd", str(probe_cwd)]),
+        inherited_environment=probe_environment,
+    )
+    try:
+        opened = service.call("shell_open", {})
+        assert not opened.isError
+        payload = cast(dict[str, Any], opened.structuredContent)
+        assert payload["dialect"] == expected_dialect
+        executed = service.call(
+            "shell_exec",
+            {
+                "shell_id": payload["shell_id"],
+                "command": (
+                    "printf '%s\\n' 'AUTO_NATIVE_中文🙂' line1 line2 "
+                    '"$TFBASH_REAL_PROBE"; (exit 37)'
+                ),
+                "yield_ms": 10_000,
+                "timeout_ms": 10_000,
+            },
+        )
+        result = cast(dict[str, Any], executed.structuredContent)
+        assert result["status"] == "exited"
+        assert result["exit_code"] == 37
+        assert cast(str, result["output"]).splitlines() == [
+            "AUTO_NATIVE_中文🙂",
+            "line1",
+            "line2",
+            "环境值🙂",
+        ]
+        assert result["cwd"] == str(probe_cwd)
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a native POSIX PTY")
+def test_posix_powershell_core_uses_native_pty(tmp_path: Path) -> None:
+    executable = os.environ.get("PHASE0_POSIX_PWSH") or shutil.which("pwsh")
+    if executable is None:
+        pytest.skip("PowerShell Core is not installed locally")
+    probe_cwd = tmp_path / "pwsh-探针"
+    probe_cwd.mkdir()
+    probe_environment = {**os.environ, "TFBASH_REAL_PROBE": "环境值🙂"}
+    service = build_service(
+        build_parser().parse_args(
+            [
+                "--runtime-profile",
+                "pwsh",
+                "--shell",
+                executable,
+                "--default-cwd",
+                str(probe_cwd),
+                "--close-timeout-ms",
+                "10000",
+            ]
+        ),
+        inherited_environment=probe_environment,
+    )
+    try:
+        opened = service.call("shell_open", {})
+        assert not opened.isError
+        payload = cast(dict[str, Any], opened.structuredContent)
+        assert payload["dialect"] == "pwsh"
+        executed = service.call(
+            "shell_exec",
+            {
+                "shell_id": payload["shell_id"],
+                "command": (
+                    "Write-Output 'POSIX_PWSH_中文🙂'; Write-Output 'line1'; "
+                    "Write-Output 'line2'; Write-Output $env:TFBASH_REAL_PROBE; "
+                    "& /bin/sh -c 'exit 37'"
+                ),
+                "yield_ms": 10_000,
+                "timeout_ms": 10_000,
+            },
+        )
+        result = cast(dict[str, Any], executed.structuredContent)
+        assert result["status"] == "exited"
+        assert result["exit_code"] == 37
+        assert cast(str, result["output"]).splitlines() == [
+            "POSIX_PWSH_中文🙂",
+            "line1",
+            "line2",
+            "环境值🙂",
+        ]
+        assert result["cwd"] == str(probe_cwd)
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows ConPTY")
+def test_windows_auto_prefers_stable_powershell_core(tmp_path: Path) -> None:
+    probe_cwd = tmp_path / "auto-探针"
+    probe_cwd.mkdir()
+    probe_environment = {**os.environ, "TFBASH_REAL_PROBE": "环境值🙂"}
+    service = build_service(
+        build_parser().parse_args(
+            [
+                "--runtime-profile",
+                "auto",
+                "--default-cwd",
+                str(probe_cwd),
+                "--close-timeout-ms",
+                "10000",
+            ]
+        ),
+        inherited_environment=probe_environment,
+    )
+    try:
+        opened = service.call("shell_open", {})
+        assert not opened.isError
+        payload = cast(dict[str, Any], opened.structuredContent)
+        assert payload["dialect"] == "pwsh"
+        runtime = service._agent_context.runtime
+        assert runtime.shell_version.endswith(" (Core)")
+        assert "-" not in runtime.shell_version
+        executed = service.call(
+            "shell_exec",
+            {
+                "shell_id": payload["shell_id"],
+                "command": (
+                    "Write-Output 'WINDOWS_AUTO_中文🙂'; Write-Output 'line1'; "
+                    "Write-Output 'line2'; Write-Output $env:TFBASH_REAL_PROBE; "
+                    "& $env:ComSpec /d /c exit 37"
+                ),
+                "yield_ms": 10_000,
+                "timeout_ms": 10_000,
+            },
+        )
+        result = cast(dict[str, Any], executed.structuredContent)
+        assert result["status"] == "exited"
+        assert result["exit_code"] == 37
+        assert cast(str, result["output"]).splitlines() == [
+            "WINDOWS_AUTO_中文🙂",
+            "line1",
+            "line2",
+            "环境值🙂",
+        ]
+        assert native_paths_equal(
+            cast(str, result["cwd"]),
+            str(probe_cwd),
+            windows=True,
+        )
+    finally:
+        service.shutdown()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows ConPTY")
 @pytest.mark.parametrize(
-    ("environment_name", "runtime_profile", "command", "expected_dialect"),
+    ("environment_name", "runtime_profile", "expected_dialect"),
     [
-        (
-            "PHASE0_WINDOWS_POWERSHELL",
-            "pwsh",
-            "Write-Output windows-powershell-51; $global:LASTEXITCODE=37; throw 'exit'",
-            "pwsh",
-        ),
-        (
-            "PHASE0_GIT_BASH",
-            "bash",
-            "printf 'git-bash-windows\\n'; (exit 37)",
-            "bash",
-        ),
+        ("PHASE0_WINDOWS_POWERSHELL", "pwsh", "pwsh"),
+        ("PHASE0_GIT_BASH", "bash", "bash"),
+        ("PHASE0_MSYS2_ZSH", "zsh", "zsh"),
     ],
 )
 def test_windows_alternate_shells_use_conpty(
     environment_name: str,
     runtime_profile: str,
-    command: str,
     expected_dialect: str,
+    tmp_path: Path,
 ) -> None:
     executable = os.environ.get(environment_name)
     if executable is None or not Path(executable).is_file():
         pytest.skip(f"{environment_name} is not installed")
+    probe_cwd = tmp_path / f"{runtime_profile}-探针"
+    probe_cwd.mkdir()
+    probe_environment = {**os.environ, "TFBASH_REAL_PROBE": "环境值🙂"}
     service = build_service(
         build_parser().parse_args(
             [
@@ -677,16 +826,28 @@ def test_windows_alternate_shells_use_conpty(
                 runtime_profile,
                 "--shell",
                 executable,
+                "--default-cwd",
+                str(probe_cwd),
                 "--close-timeout-ms",
                 "10000",
             ]
-        )
+        ),
+        inherited_environment=probe_environment,
     )
     try:
         opened = service.call("shell_open", {})
         assert not opened.isError
         opened_payload = cast(dict[str, Any], opened.structuredContent)
         assert opened_payload["dialect"] == expected_dialect
+        marker = f"WINDOWS_{expected_dialect.upper()}_中文🙂"
+        command = (
+            (
+                f"Write-Output '{marker}'; Write-Output 'line1'; Write-Output 'line2'; "
+                "Write-Output $env:TFBASH_REAL_PROBE; & $env:ComSpec /d /c exit 37"
+            )
+            if expected_dialect == "pwsh"
+            else (f"printf '%s\\n' '{marker}' line1 line2 \"$TFBASH_REAL_PROBE\"; (exit 37)")
+        )
         executed = service.call(
             "shell_exec",
             {
@@ -699,5 +860,19 @@ def test_windows_alternate_shells_use_conpty(
         payload = cast(dict[str, Any], executed.structuredContent)
         assert payload["status"] == "exited"
         assert payload["exit_code"] == 37
+        assert cast(str, payload["output"]).splitlines() == [
+            marker,
+            "line1",
+            "line2",
+            "环境值🙂",
+        ]
+        assert payload["cwd"] is not None
+        assert native_paths_equal(
+            cast(str, payload["cwd"]),
+            str(probe_cwd),
+            windows=True,
+        )
+        if expected_dialect in {"bash", "zsh"}:
+            assert "\\" not in cast(str, payload["cwd"])
     finally:
         service.shutdown()

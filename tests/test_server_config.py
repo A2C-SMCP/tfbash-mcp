@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anyio
@@ -30,14 +31,17 @@ from tfbash_mcp.runtime import (
     RuntimeConfigurationError,
     RuntimeName,
     ShellResolution,
+    ShellStartRequest,
     WindowsProcessSupervisor,
     WindowsPwshProfile,
 )
+from tfbash_mcp.runtime.resolver import RoutingCleanupError
 from tfbash_mcp.server import (
     _build_posix_runtime,
     _build_windows_runtime,
     _create_tool_limiters,
     _OverviewSubscriptionHub,
+    _probe_managed_candidate,
     _probe_shell_version,
     _redact_sensitive_schema_defaults,
     _run_tool_call,
@@ -213,6 +217,102 @@ def test_shell_version_probe_reports_a_redacted_configuration_error() -> None:
 
     assert str(captured.value) == "configured shell version probe failed"
     assert "secret-shell-name" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code", "cwd", "output"),
+    [
+        ("running", 37, "/workspace", "TFBASH_MANAGED_中文🙂\nline1\nline2\n环境中文🙂\n"),
+        ("exited", 0, "/workspace", "TFBASH_MANAGED_中文🙂\nline1\nline2\n环境中文🙂\n"),
+        ("exited", 37, "/wrong-workspace", "TFBASH_MANAGED_中文🙂\nline1\nline2\n环境中文🙂\n"),
+        ("exited", 37, "/workspace", "TFBASH_MANAGED_中文🙂 line1 line2 环境中文🙂\n"),
+        ("exited", 37, "/workspace", "wrong-marker\nline1\nline2\n环境中文🙂\n"),
+        ("exited", 37, "/workspace", "TFBASH_MANAGED_中文🙂\nline1\nline2\nwrong-env\n"),
+    ],
+)
+def test_managed_probe_requires_exact_contract_and_always_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    exit_code: int,
+    cwd: str,
+    output: str,
+) -> None:
+    closed: list[str] = []
+    shutdown: list[bool] = []
+
+    class FakeManager:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def open_shell(self, request: ShellStartRequest) -> SimpleNamespace:
+            assert request.startup_command is None
+            return SimpleNamespace(shell_id="shell_1")
+
+        def exec(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                status=SimpleNamespace(value=status),
+                exit_code=exit_code,
+                cwd=cwd,
+                output=output,
+            )
+
+        def close_shell(self, shell_id: str) -> None:
+            closed.append(shell_id)
+
+        def shutdown(self) -> None:
+            shutdown.append(True)
+
+    monkeypatch.setattr(server_module, "CommandShellManager", FakeManager)
+
+    with pytest.raises(RuntimeConfigurationError, match="managed shell capability"):
+        _probe_managed_candidate(
+            _test_resolution(),
+            arguments=build_parser().parse_args([]),
+            cwd="/workspace",
+            environment={},
+        )
+
+    assert closed == ["shell_1"]
+    assert shutdown == [True]
+
+
+def test_managed_probe_cleanup_failure_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutdown: list[bool] = []
+
+    class FakeManager:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def open_shell(self, _request: object) -> SimpleNamespace:
+            return SimpleNamespace(shell_id="shell_1")
+
+        def exec(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                status=SimpleNamespace(value="exited"),
+                exit_code=37,
+                cwd="/workspace",
+                output="TFBASH_MANAGED_中文🙂\nline1\nline2\n环境中文🙂\n",
+            )
+
+        def close_shell(self, _shell_id: str) -> None:
+            raise OSError("native handle remains")
+
+        def shutdown(self) -> None:
+            shutdown.append(True)
+
+    monkeypatch.setattr(server_module, "CommandShellManager", FakeManager)
+
+    with pytest.raises(RoutingCleanupError, match="cleanup failed"):
+        _probe_managed_candidate(
+            _test_resolution(),
+            arguments=build_parser().parse_args([]),
+            cwd="/workspace",
+            environment={},
+        )
+
+    assert shutdown == [True]
 
 
 def test_agent_visible_schema_omits_shell_and_startup_command_defaults() -> None:

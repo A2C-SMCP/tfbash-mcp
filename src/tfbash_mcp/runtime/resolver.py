@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import ntpath
 import os
 import re
 import shutil
@@ -83,6 +84,7 @@ def resolve_shell(
                     )
             _capability_probe(
                 candidate,
+                platform=platform,
                 cwd=cwd,
                 environment=environment,
                 timeout_ms=timeout_ms,
@@ -261,6 +263,7 @@ def _identity_probe(
 def _capability_probe(
     candidate: _Candidate,
     *,
+    platform: NativePlatform,
     cwd: str,
     environment: Mapping[str, str],
     timeout_ms: int,
@@ -287,11 +290,12 @@ def _capability_probe(
             script,
         ]
     else:
+        cwd_command = 'cygpath -am "$PWD"' if platform is NativePlatform.WINDOWS else "pwd -P"
         script = (
             "if printf '' | base64 --decode >/dev/null 2>&1; then :; "
             "elif printf '' | base64 -D >/dev/null 2>&1; then :; else exit 125; fi; "
             f"printf '%s\\n' '{marker}' line1 line2 \"$TFBASH_ROUTING_PROBE\"; "
-            "pwd -P; (exit 37)"
+            f"{cwd_command}; (exit 37)"
         )
         arguments = (
             ["--noprofile", "--norc", "-c"]
@@ -310,9 +314,18 @@ def _capability_probe(
         check=False,
         timeout=timeout_ms / 1000,
     )
-    output = completed.stdout
-    required = (marker, "line1", "line2", "环境中文🙂")
-    if completed.returncode != 37 or any(value not in output for value in required):
+    lines = [line.rstrip("\r") for line in completed.stdout.splitlines()]
+    expected = [marker, "line1", "line2", "环境中文🙂"]
+    reported_cwd = lines[-1] if len(lines) == len(expected) + 1 else ""
+    if (
+        completed.returncode != 37
+        or lines[:-1] != expected
+        or not native_paths_equal(
+            reported_cwd,
+            cwd,
+            windows=platform is NativePlatform.WINDOWS,
+        )
+    ):
         raise RuntimeConfigurationError("shell failed the required capability probe")
 
 
@@ -339,6 +352,14 @@ def _absolute_executable(executable: str, platform: NativePlatform) -> str:
     if platform is NativePlatform.WINDOWS:
         return str(PureWindowsPath(executable))
     return os.path.abspath(executable)
+
+
+def native_paths_equal(left: str, right: str, *, windows: bool) -> bool:
+    """Compare native paths while accepting Windows slash and case variants."""
+
+    if windows:
+        return ntpath.normcase(ntpath.normpath(left)) == ntpath.normcase(ntpath.normpath(right))
+    return os.path.realpath(left) == os.path.realpath(right)
 
 
 def _deduplicate(candidates: Iterable[_Candidate]) -> tuple[_Candidate, ...]:

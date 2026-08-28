@@ -47,4 +47,4 @@ jobs:
       - name: Test
         run: |
           uv run coverage run -m pytest
-          uv run coverage report --show-missing
+          uv run coverage report --show-missing --fail-under=80

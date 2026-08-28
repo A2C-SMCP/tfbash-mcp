@@ -50,6 +50,18 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --all-groups --python 3.12.10
 
+      - name: Require every supported POSIX shell
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install --yes zsh
+          fi
+          for executable in bash zsh pwsh; do
+            command -v "$executable"
+          done
+          echo "PHASE0_POSIX_PWSH=$(command -v pwsh)" >> "$GITHUB_ENV"
+
       - name: Run shared and native POSIX integration contracts
         run: |
           uv run --python 3.12.10 pytest \
@@ -103,6 +115,33 @@ jobs:
           "PHASE0_PWSH=$(Join-Path $install 'pwsh.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PHASE0_WINDOWS_POWERSHELL=$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PHASE0_GIT_BASH=$env:ProgramFiles\Git\bin\bash.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $install | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install fully updated MSYS2 Zsh
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: MSYS
+          update: true
+          install: zsh
+
+      - name: Require every supported Windows shell
+        shell: pwsh
+        run: |
+          $msysBin = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "usr\bin"
+          $zsh = Join-Path $msysBin "zsh.exe"
+          foreach ($executable in @(
+            $env:PHASE0_PWSH,
+            $env:PHASE0_WINDOWS_POWERSHELL,
+            $env:PHASE0_GIT_BASH,
+            $zsh
+          )) {
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+              throw "Required Windows shell is unavailable: $executable"
+            }
+          }
+          "PHASE0_MSYS2_ZSH=$zsh" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $msysBin | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install locked dependencies
         run: uv sync --locked --all-groups --python 3.12.10
