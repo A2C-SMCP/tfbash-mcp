@@ -8,7 +8,7 @@
 | 首个集成方 | `tfrobot-client` |
 | 决策 | 共享 Shell Runtime；默认提供独立 stdio MCP Server，Python 宿主可进程内嵌入 |
 | V1 实现 | Python 3.10–3.12、MCP Python SDK、uv/uvx；POSIX 使用 pexpect，Windows 使用经实验选定的 ConPTY transport |
-| 0.2.0 平台 | macOS/Linux：Bash、Zsh、PowerShell Core + POSIX PTY；Windows 11 x64：PowerShell 5.1/Core、Git Bash、显式 MSYS2 Zsh + native ConPTY |
+| 0.2.0 平台 | macOS/Linux：Bash、Zsh、PowerShell Core + POSIX PTY；Windows 11 x64：PowerShell 5.1/Core、Git Bash + native ConPTY |
 | V1 宿主 | standalone 与 IDE 共用同一 Runtime/工具合同；宿主负责显式配置、项目路由、工具注册和生命周期 |
 | 合同状态 | 七个工具名、字段与领域模型已冻结；`shell_write` 仅接受 UTF-8 `text`，任意二进制 stdin 与 EOF control 未进入 V1 |
 | 信任模型 | 可信本机环境，不提供 approval、sandbox 或命令策略 |
@@ -56,7 +56,7 @@ Agent 需要执行构建、测试、脚本和开发服务；短命令应快速�
 ### 3.1 V1 范围
 
 - macOS、Linux 本机环境：Bash、Zsh 或 PowerShell Core + POSIX PTY；
-- Windows 11 x64 本机环境：PowerShell Desktop 5.1/Core、Git Bash 或显式 MSYS2 Zsh + native ConPTY；
+- Windows 11 x64 本机环境：PowerShell Desktop 5.1/Core 或 Git Bash + native ConPTY；
 - stdio MCP 传输，以及供 Python 宿主注册进自身 MCP Server 的进程内异步 API；
 - uv/uvx 安装与启动；
 - 一个 Runtime 实例可创建多个显式寻址的持久命令 Shell；
@@ -117,7 +117,7 @@ Agent 需要执行构建、测试、脚本和开发服务；短命令应快速�
        └── ProcessSupervisor        POSIX process group / Windows Job
 ```
 
-这里的 `RuntimeProfile` 是 Runtime 实例内部组合根，不是每次工具调用的选择字段。0.2.0 将方言与原生终端后端解耦，由 stdio 启动参数或 `EmbeddedShellConfig.runtime_profile` 以 `auto|bash|zsh|pwsh` 一次选定；`auto` 按操作系统定义的候选顺序执行身份、能力和真实受管 PTY 探针，不根据 IDE、`TERM_PROGRAM` 或命令内容猜测。同一实例内的全部 Shell 使用同一组合。
+这里的 `RuntimeProfile` 是 Runtime 实例内部组合根，不是每次工具调用的选择字段。0.2.0 将方言与原生终端后端解耦，由 stdio 启动参数或 `EmbeddedShellConfig.runtime_profile` 以 `auto|bash|zsh|pwsh` 一次选定；`auto` 按操作系统定义的候选顺序执行身份与非交互能力探针，不根据 IDE、`TERM_PROGRAM` 或命令内容猜测。同一实例内的全部 Shell 使用同一组合，真实 PTY/ConPTY 启动合同在 `shell_open` 时验证。
 
 依赖方向固定为：MCP Adapter → Shell Domain → Runtime Ports；具体 Bash/PowerShell、pexpect/ConPTY 和平台进程监管实现反向实现 Runtime Ports。Shell Domain 不得导入具体 transport，不得保存 fd、HANDLE、POSIX process group、Windows Job Object 或平台 PID 枚举细节；Runtime 实现也不得自行构造 MCP error envelope 或修改 Shell/Execution 状态机。
 
@@ -296,7 +296,7 @@ Runtime 实例创建时选定，不能按 Shell 覆盖：
 管理约束：
 
 - Runtime 实例创建时不创建隐式默认 Shell；
-- Runtime 实例创建时对候选程序执行身份、退出码、Unicode、多行、cwd/env 和真实受管 PTY/ConPTY 能力探针；PowerShell Desktop 5.1、稳定 Core、Bash 与 Zsh 按平台组合准入，CMD、WSL 或未通过探针的程序被拒绝；
+- Runtime 实例创建时对候选程序执行身份、退出码、Unicode、多行和 cwd/env 非交互能力探针；`shell_open` 再验证真实受管 PTY/ConPTY 启动合同。PowerShell Desktop 5.1、稳定 Core、Bash 与 Zsh 按平台支持面准入，CMD、WSL 或未通过探针的程序被拒绝；
 - `shell_open` 只有在初始 prompt 和 `startup_command` 成功后才注册并返回 `ready`。spawn、初始 prompt、能力探针和 startup command 共用一个从 open 被接受起计算的 `shell_startup_timeout_ms` 总 deadline；启动命令非零、deadline 到期、EOF 或 spawn 失败统一清理受管进程并返回 `shell_start_failed`，不占用 Shell 配额；
 - Shell Registry 状态为 `ready`、`busy`、`rebuilding`、`closing` 或 `error`；
 - Registry 创建、注册、关闭、列举和容量计数由 manager 级锁保护，但持锁时不得执行阻塞 PTY 操作；
@@ -317,7 +317,7 @@ Runtime 实例创建时选定，不能按 Shell 覆盖：
 }
 ```
 
-`command` 由 Runtime 实例选定的方言解释：上例属于 Bash/Zsh；PowerShell 应使用 `Set-Location project; uv run pytest`。Windows 也可能选择 Git Bash 或显式 MSYS2 Zsh，POSIX 也可能选择 PowerShell Core。Runtime 不翻译方言，也不根据命令内容切换。
+`command` 由 Runtime 实例选定的方言解释：上例属于 Bash/Zsh；PowerShell 应使用 `Set-Location project; uv run pytest`。Windows 也可能选择 Git Bash，POSIX 也可能选择 PowerShell Core。Runtime 不翻译方言，也不根据命令内容切换。
 
 输入字段：
 
@@ -960,7 +960,7 @@ stdio Server 的 CLI 配置只描述其所持有 Runtime 的运行环境：
 | `max_pending_operations`、`max_pending_write_bytes` | 与同名 CLI 默认值一致 | 每 Shell 控制操作与待写字节配额 |
 | `operating_system`、`process_cwd` | 自动快照 | 供平台组合和默认路径使用；主要用于受控宿主与跨平台测试 |
 
-`EmbeddedShellRuntime.create()` 异步完成解析、能力探测和真实受管 PTY/ConPTY 探针；
+`EmbeddedShellRuntime.create()` 异步完成解析和非交互能力探测；真实受管 PTY/ConPTY 启动在首次 `shell_open` 时验证；
 `instructions`、`list_tools()` 和 `call_tool()` 分别提供宿主初始化说明、完整 Tool 定义以及
 异步调用入口。宿主必须先按项目选中实例，再转发调用；`shell_id`/`exec_id` 不能跨实例寻址。
 `aclose()` 并发幂等，清理失败后实例保持不可调用但可再次关闭重试。
@@ -969,7 +969,7 @@ stdio Server 启动或嵌入 Runtime 创建时把上述输入冻结为实例级 
 
 `active_venv_cmd` 改名为通用的 `startup_command`；它可以加载 Conda、direnv 或其他需要 Shell 命令的项目环境，不把协议绑定到 Python。标准 Python venv 应由 standalone launcher 或 IDE 解析：stdio 模式通过 descriptor/process environment 注入 `VIRTUAL_ENV` 并把 venv 的 `bin` 或 `Scripts` 目录预置到 `PATH`/`Path`，嵌入模式通过 `EmbeddedShellConfig.environment` 传入同一快照。环境不作为可能泄密的 CLI 参数，也不依赖 PowerShell execution policy。Runtime 不扫描项目寻找虚拟环境。
 
-0.2.0 公开组合级 `runtime_profile`/`--runtime-profile auto|bash|zsh|pwsh`，不公开 backend 参数。方言与 OS 解耦，Runtime 根据候选程序能力推断并组合 POSIX PTY 或 Windows ConPTY 后端。`auto` 在 macOS 优先系统 zsh，在 Linux 优先系统 Bash，在 Windows 依次尝试稳定 PowerShell Core、Windows PowerShell 5.1 和 Git Bash；显式方言可在任意存在兼容原生实现的平台使用。WSL 明确拒绝。Host Profile 只影响 workspace/config 来源、环境初始化责任和诊断元数据。
+0.2.0 公开组合级 `runtime_profile`/`--runtime-profile auto|bash|zsh|pwsh`，不公开 backend 参数。方言与 OS 解耦，Runtime 根据候选程序能力推断并组合 POSIX PTY 或 Windows ConPTY 后端。`auto` 在 macOS 优先系统 zsh，在 Linux 优先系统 Bash，在 Windows 依次尝试稳定 PowerShell Core、Windows PowerShell 5.1 和 Git Bash；Windows 显式支持 `bash|pwsh`，POSIX 显式支持 `bash|zsh|pwsh`。WSL 明确拒绝。Host Profile 只影响 workspace/config 来源、环境初始化责任和诊断元数据。
 
 `--workspace-root` 与显式 `--default-cwd` 必须是启动时存在且可进入的平台原生绝对路径。`standalone` 省略 workspace 时使用 Server 启动 cwd；`ide` 必须由宿主显式提供 workspace。继承的环境值和 startup command 永不回显。V1 不通过 deprecated MCP roots、`TERM_PROGRAM`、VS Code/Cursor 环境变量或当前进程 cwd 的偶然变化推断 IDE workspace。
 
@@ -1076,7 +1076,7 @@ stdio Server 启动或嵌入 Runtime 创建时把上述输入冻结为实例级 
 | 是否一实例服务多个 Computer | 否，一个项目/Computer 一个 Runtime；同进程可容纳多个隔离实例 |
 | 工具是否携带 Computer ID | 否 |
 | V1 实现语言 | Python，但 MCP 合同语言无关 |
-| 0.2.0 平台范围 | macOS/Linux：Bash、Zsh、PowerShell Core + POSIX PTY；Windows 11 x64：PowerShell 5.1/Core、Git Bash、显式 MSYS2 Zsh + native ConPTY |
+| 0.2.0 平台范围 | macOS/Linux：Bash、Zsh、PowerShell Core + POSIX PTY；Windows 11 x64：PowerShell 5.1/Core、Git Bash + native ConPTY |
 | 七工具合同 | 工具名、字段与领域模型已冻结；`shell_write` 仅含必填 `shell_id`、`exec_id`、`text`，任意二进制 stdin 与 EOF control 已在 V1 冻结前删除 |
 | 平台分层 | Shell Domain 只依赖 `ShellDialect`、`PtyTransport`、`ProcessSupervisor` Runtime Ports |
 | Runtime Profile 选择 | 0.2.0 实例创建时选择 `auto|bash|zsh|pwsh`，一个实例只使用一个方言与原生后端组合 |

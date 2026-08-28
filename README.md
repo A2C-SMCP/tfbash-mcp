@@ -197,11 +197,11 @@ Server 同时暴露 `window://io.github.a2c-smcp.tfbash/shell-overview` Markdown
 服务在 stdin EOF、客户端断开或取消时走同一个有界 shutdown 路径，关闭全部 Shell 及其
 受管进程。`auto` 的候选顺序为：macOS 系统 zsh → 其他 zsh → 系统 Bash → 其他
 Bash；Linux 系统 Bash → 其他 Bash → 系统 zsh → 其他 zsh；Windows 稳定版
-PowerShell Core → Windows PowerShell 5.1 → Git Bash。显式 `bash|zsh|pwsh` 可在任意
-拥有兼容原生实现的平台使用。Windows Bash/Zsh 使用 MSYS 路径语义执行命令，但 MCP cwd
+PowerShell Core → Windows PowerShell 5.1 → Git Bash。显式 `zsh` 仅支持 POSIX；Windows
+支持显式 `bash|pwsh`。Windows Git Bash 使用 MSYS 路径语义执行命令，但 MCP cwd
 字段仍返回 `C:/...` Windows 路径。WSL 不在 `0.2.0` 范围内，传入 WSL 程序会得到明确错误。
 
-Zsh 不引入新的 Python 包；Bash、Zsh、PowerShell 与 Git Bash/MSYS2 都是可选的系统
+Zsh 不引入新的 Python 包；Bash、Zsh、PowerShell 与 Git Bash 都是可选的系统
 程序。使用 `uvx` 时仍只需满足项目声明的 Python/uv 与对应平台依赖；Windows 的 ConPTY
 实现继续由条件依赖 `pywinpty` 提供。
 

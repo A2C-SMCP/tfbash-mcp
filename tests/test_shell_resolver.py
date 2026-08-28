@@ -270,22 +270,19 @@ def test_windows_powershell_discovery_orders_core_registry_and_desktop(
     ]
 
 
-def test_windows_posix_shell_discovery_checks_path_and_common_roots(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("explicit_shell", [None, r"D:\bin\zsh.exe"])
+def test_windows_zsh_is_rejected_with_an_actionable_diagnostic(
+    explicit_shell: str | None,
 ) -> None:
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: r"D:\bin\zsh.exe")
-    monkeypatch.setattr(os.path, "expandvars", lambda path: path)
-    monkeypatch.setattr(
-        os.path,
-        "isfile",
-        lambda path: "msys64" in path.casefold() and path.endswith("zsh.exe"),
-    )
-
-    candidates = tuple(resolver_module._candidates_for(DialectName.ZSH, NativePlatform.WINDOWS, {}))
-
-    assert candidates[0].executable == r"D:\bin\zsh.exe"
-    assert candidates[0].source == "PATH"
-    assert any(candidate.source == "Git Bash/MSYS2" for candidate in candidates[1:])
+    with pytest.raises(RuntimeConfigurationError, match="zsh is not supported on Windows"):
+        resolve_shell(
+            RuntimeSelection.ZSH if explicit_shell is None else RuntimeSelection.AUTO,
+            platform=NativePlatform.WINDOWS,
+            explicit_shell=explicit_shell,
+            cwd=r"C:\workspace",
+            environment={},
+            timeout_ms=1_000,
+        )
 
 
 def test_windows_registry_discovery_closes_root_and_ignores_invalid_entries(

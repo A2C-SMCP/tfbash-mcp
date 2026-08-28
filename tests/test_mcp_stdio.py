@@ -804,7 +804,6 @@ def test_windows_auto_prefers_stable_powershell_core(tmp_path: Path) -> None:
     [
         ("PHASE0_WINDOWS_POWERSHELL", "pwsh", "pwsh"),
         ("PHASE0_GIT_BASH", "bash", "bash"),
-        ("PHASE0_MSYS2_ZSH", "zsh", "zsh"),
     ],
 )
 def test_windows_alternate_shells_use_conpty(

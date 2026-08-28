@@ -51,6 +51,10 @@ def resolve_shell(
 ) -> ShellResolution:
     """Return the first admitted native shell, or one redacted aggregate error."""
 
+    if platform is NativePlatform.WINDOWS and selection is RuntimeSelection.ZSH:
+        raise RuntimeConfigurationError(
+            "zsh is not supported on Windows; use native PowerShell or Git Bash"
+        )
     explicit = explicit_shell is not None
     if explicit_shell is not None and _looks_like_wsl(explicit_shell):
         raise RuntimeConfigurationError(
@@ -129,6 +133,10 @@ def _explicit_candidate(
     if not absolute:
         raise RuntimeConfigurationError("--shell must be a native absolute path")
     dialect = _infer_dialect(path)
+    if platform is NativePlatform.WINDOWS and dialect is DialectName.ZSH:
+        raise RuntimeConfigurationError(
+            "zsh is not supported on Windows; use native PowerShell or Git Bash"
+        )
     if selection is not RuntimeSelection.AUTO and dialect.value != selection.value:
         raise RuntimeConfigurationError("--shell does not match --runtime-profile")
     return (_Candidate(dialect, path, "explicit"),)
