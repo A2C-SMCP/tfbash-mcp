@@ -5,6 +5,16 @@ class RuntimeBoundaryError(RuntimeError):
     """Base class for failures raised below the Shell Domain."""
 
 
+class StartupHandshakeError(RuntimeBoundaryError):
+    """A shell did not reach one of the bounded startup protocol phases."""
+
+    def __init__(self, phase: str) -> None:
+        if phase not in {"initial-prompt", "startup-record"}:
+            raise ValueError("invalid startup handshake phase")
+        self.phase = phase
+        super().__init__("shell did not become ready before startup deadline")
+
+
 class RuntimeConfigurationError(RuntimeBoundaryError):
     """The process-level host/runtime configuration is invalid."""
 

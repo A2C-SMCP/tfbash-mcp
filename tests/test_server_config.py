@@ -413,6 +413,24 @@ def test_close_timeout_is_hard_deadline_and_shutdown_grace_configures_supervisor
     service.shutdown()
 
 
+def test_windows_bash_bootstrap_configures_terminal_echo_suppression_twice() -> None:
+    runtime = _build_windows_runtime(
+        dialect=DialectName.BASH,
+        executable=r"C:\Program Files\Git\bin\bash.exe",
+    )
+
+    plan = runtime.dialect.prepare_session(
+        ShellStartRequest(
+            executable=runtime.dialect.default_executable,
+            cwd=r"C:\workspace",
+            environment={},
+            startup_command=None,
+        )
+    )
+
+    assert plan.launch.initial_input.count(b"stty -echo 2>/dev/null || :;") == 2
+
+
 def test_saturated_wait_lane_cannot_starve_close_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

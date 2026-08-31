@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import time
 from collections import deque
@@ -1434,6 +1435,7 @@ def test_shutdown_thread_start_failure_retains_worker_for_next_shutdown(
 
 def test_worker_thread_start_failure_cleans_runtime_before_open_returns(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     profile = _fake_profile(RuntimeName.POSIX_BASH)
     transport = profile.transport
@@ -1445,10 +1447,11 @@ def test_worker_thread_start_failure_cleans_runtime_before_open_returns(
 
     def injected_start(thread: Thread) -> None:
         if thread.name.startswith("tfbash-shell_"):
-            raise RuntimeError("injected worker thread exhaustion")
+            raise RuntimeError("injected worker thread exhaustion SECRET_SENTINEL")
         original_start(thread)
 
     monkeypatch.setattr(Thread, "start", injected_start)
+    caplog.set_level(logging.ERROR, logger="tfbash_mcp.domain.manager")
 
     with pytest.raises(RuntimeBoundaryError, match="failed to start the Shell worker"):
         manager.open_shell(_request(profile.dialect.default_executable))
@@ -1456,6 +1459,16 @@ def test_worker_thread_start_failure_cleans_runtime_before_open_returns(
     assert supervisor.cleanup_calls == 1
     assert transport.close_called.is_set()
     assert manager._pending_cleanup == {}
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "tfbash_mcp.domain.manager" and record.levelno == logging.ERROR
+    ]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "stage=startup-handshake" in message
+    assert "error_chain=RuntimeBoundaryError<-RuntimeError" in message
+    assert "SECRET_SENTINEL" not in message
     manager.shutdown()
 
 
@@ -1946,7 +1959,10 @@ def test_failed_cleanup_remains_reachable_for_shutdown_retry() -> None:
     assert supervisor.cleanup_calls == 3
 
 
-def test_startup_deadline_begins_before_dialect_preparation_and_retains_cleanup() -> None:
+def test_startup_deadline_begins_before_dialect_preparation_and_retains_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="tfbash_mcp.domain.manager")
     profile = _fake_profile(RuntimeName.POSIX_BASH)
     supervisor = profile.supervisor
     assert isinstance(supervisor, _Supervisor)
@@ -1999,6 +2015,12 @@ def test_startup_deadline_begins_before_dialect_preparation_and_retains_cleanup(
     assert supervisor.cleanup_calls == 2
     replacement = manager.open_shell(_request(profile.dialect.default_executable))
     assert manager.close_shell(replacement.shell_id)
+    assert any(
+        "stage=startup-handshake" in record.getMessage()
+        and "handshake_phase=startup-record" in record.getMessage()
+        for record in caplog.records
+        if record.name == "tfbash_mcp.domain.manager"
+    )
 
     manager.shutdown()
     assert supervisor.cleanup_calls == 3
