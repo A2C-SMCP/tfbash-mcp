@@ -37,6 +37,7 @@ _VT_SEQUENCE = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x
 _MAX_WINDOWS_EXIT_CODE = 4_294_967_295
 _CONTROL_ECHO_PREFIX_BYTES = 256
 _PRIVATE_FRAGMENT_BYTES = 8
+_POSIX_INPUT_CHUNK_CHARACTERS = 512
 
 
 class _ParserState(Enum):
@@ -136,15 +137,48 @@ class PowerShellDialect:
         )
         if not self._windows_paths:
             prompt = _powershell_literal(protocol._prompt.decode("ascii"))
+            chunk_prefix = _powershell_literal(f"__TFPWSH_CHUNK_{session_token}:")
             launch_script += (
-                ";& /bin/stty -echo -icanon min 1 time 0;"
+                f";$__tf_chunk_prefix={chunk_prefix};"
+                "$__tf_payload='';$__tf_payload_token='';"
+                "& /bin/stty -echo -icanon min 1 time 0;"
                 "if($LASTEXITCODE -ne 0){throw 'failed to configure the POSIX terminal'};"
                 f"[Console]::Out.Write({prompt});"
                 "$__tf_input=[Console]::In.ReadLine();"
                 "while($null -ne $__tf_input){"
+                "$__tf_prompt_required=$true;"
+                "if($__tf_input.StartsWith($__tf_chunk_prefix,[StringComparison]::Ordinal)){"
+                "$__tf_chunk=$__tf_input.Substring($__tf_chunk_prefix.Length);"
+                "$__tf_separator=$__tf_chunk.IndexOf(':',2);"
+                "if($__tf_separator -gt 2){"
+                "$__tf_chunk_op=$__tf_chunk.Substring(0,1);"
+                "$__tf_chunk_token=$__tf_chunk.Substring(2,$__tf_separator-2);"
+                "$__tf_chunk_data=$__tf_chunk.Substring($__tf_separator+1);"
+                "if(($__tf_chunk_op -ceq 'S') -and "
+                "($__tf_chunk_token -cmatch '^[A-Za-z0-9]{16,64}$')){"
+                "$__tf_payload_token=$__tf_chunk_token;$__tf_payload=$__tf_chunk_data;"
+                "$__tf_prompt_required=$false"
+                "}elseif(($__tf_chunk_op -ceq 'A') -and "
+                "($__tf_chunk_token -ceq $__tf_payload_token)){"
+                "$__tf_payload+=$__tf_chunk_data;$__tf_prompt_required=$false"
+                "}elseif(($__tf_chunk_op -ceq 'X') -and "
+                "($__tf_chunk_token -ceq $__tf_payload_token)){"
+                "$__tf_payload_to_run=$__tf_payload;"
+                "$__tf_payload='';$__tf_payload_token='';"
+                "try{. ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString("
+                "[Convert]::FromBase64String($__tf_payload_to_run))))}"
+                "catch{[Console]::Error.WriteLine([string]$_)}"
+                "finally{$__tf_payload_to_run=''}"
+                "}else{$__tf_payload='';$__tf_payload_token=''}"
+                "}else{$__tf_payload='';$__tf_payload_token=''}"
+                "}else{"
+                "$__tf_payload='';$__tf_payload_token='';"
                 "try{. ([ScriptBlock]::Create($__tf_input))}"
-                "catch{[Console]::Error.WriteLine([string]$_)};"
-                f"[Console]::Out.Write({prompt});"
+                "catch{[Console]::Error.WriteLine([string]$_)}"
+                "};"
+                f"if($__tf_prompt_required){{[Console]::Out.Write({prompt})}};"
+                "$__tf_chunk='';$__tf_chunk_data='';$__tf_chunk_op='';"
+                "$__tf_chunk_token='';$__tf_separator=-1;$__tf_input='';"
                 "$__tf_input=[Console]::In.ReadLine()}"
             )
         launch = DialectLaunch(
@@ -233,7 +267,12 @@ class PowerShellProtocol(DialectProtocol):
                 ),
             )
         )
-        return _encoded_invocation(script, self._session_token, self._line_ending)
+        return _encoded_invocation(
+            script,
+            self._session_token,
+            self._line_ending,
+            chunk_session_token=(None if self._windows_paths else self._session_token),
+        )
 
     def wrap_command(self, command: str) -> CommandFrame:
         if self._state is not _ParserState.READY or self._pending_command is not None:
@@ -266,7 +305,15 @@ class PowerShellProtocol(DialectProtocol):
                 ),
             )
         )
-        frame = CommandFrame(correlation_id, _encoded_invocation(script, token, self._line_ending))
+        frame = CommandFrame(
+            correlation_id,
+            _encoded_invocation(
+                script,
+                token,
+                self._line_ending,
+                chunk_session_token=(None if self._windows_paths else self._session_token),
+            ),
+        )
         self._pending_command = _PendingCommand(correlation_id, begin_marker, result_prefix)
         self._state = _ParserState.WAITING_BEGIN
         return frame
@@ -908,7 +955,13 @@ def _encoded_command(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _encoded_invocation(script: str, token: str, line_ending: bytes) -> bytes:
+def _encoded_invocation(
+    script: str,
+    token: str,
+    line_ending: bytes,
+    *,
+    chunk_session_token: str | None = None,
+) -> bytes:
     payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
     sentinel = f"TFPWSH_INPUT_{token}"
     invocation = (
@@ -916,6 +969,17 @@ def _encoded_invocation(script: str, token: str, line_ending: bytes) -> bytes:
         "[Text.Encoding]::UTF8.GetString("
         f"[Convert]::FromBase64String('{payload}'))))"
     ).encode("ascii")
+    if chunk_session_token is not None and len(payload) > _POSIX_INPUT_CHUNK_CHARACTERS:
+        private_script = f"$null={_powershell_literal(sentinel)};{script}"
+        payload = base64.b64encode(private_script.encode("utf-8")).decode("ascii")
+        wire_prefix = f"__TFPWSH_CHUNK_{chunk_session_token}:"
+        lines = [
+            f"{wire_prefix}{'S' if offset == 0 else 'A'}:{token}:"
+            f"{payload[offset : offset + _POSIX_INPUT_CHUNK_CHARACTERS]}"
+            for offset in range(0, len(payload), _POSIX_INPUT_CHUNK_CHARACTERS)
+        ]
+        lines.append(f"{wire_prefix}X:{token}:")
+        return line_ending.join(line.encode("ascii") for line in lines) + line_ending
     return invocation + line_ending
 
 
