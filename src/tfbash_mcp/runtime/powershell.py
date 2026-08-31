@@ -143,8 +143,10 @@ class PowerShellDialect:
                 "$__tf_payload=[Text.StringBuilder]::new();$__tf_payload_token='';"
                 "& /bin/stty -echo -icanon min 1 time 0;"
                 "if($LASTEXITCODE -ne 0){throw 'failed to configure the POSIX terminal'};"
+                "$__tf_reader=[IO.StreamReader]::new('/dev/stdin',"
+                "[Text.Encoding]::UTF8,$false,1024);"
                 f"[Console]::Out.Write({prompt});"
-                "$__tf_input=[Console]::In.ReadLine();"
+                "$__tf_input=$__tf_reader.ReadLine();"
                 "while($null -ne $__tf_input){"
                 "$__tf_prompt_required=$true;"
                 "if($__tf_input.StartsWith($__tf_chunk_prefix,[StringComparison]::Ordinal)){"
@@ -181,7 +183,8 @@ class PowerShellDialect:
                 f"if($__tf_prompt_required){{[Console]::Out.Write({prompt})}};"
                 "$__tf_chunk='';$__tf_chunk_data='';$__tf_chunk_op='';"
                 "$__tf_chunk_token='';$__tf_separator=-1;$__tf_input='';"
-                "$__tf_input=[Console]::In.ReadLine()}"
+                "$__tf_input=$__tf_reader.ReadLine()};"
+                "$__tf_reader.Dispose()"
             )
         launch = DialectLaunch(
             spawn=SpawnRequest(

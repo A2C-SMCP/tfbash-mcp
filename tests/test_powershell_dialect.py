@@ -149,7 +149,7 @@ def test_prepare_session_builds_pinned_noninteractive_pwsh_launch() -> None:
 
 
 @pytest.mark.parametrize("token_length", [16, 32, 64])
-def test_posix_launch_uses_console_input_without_native_line_editing(token_length: int) -> None:
+def test_posix_launch_uses_stream_input_without_native_line_editing(token_length: int) -> None:
     session_token = "A" * token_length
     plan = PowerShellDialect(
         token_factory=_token_factory(session_token),
@@ -165,7 +165,11 @@ def test_posix_launch_uses_console_input_without_native_line_editing(token_lengt
     )
 
     launch_script = base64.b64decode(plan.launch.spawn.arguments[5]).decode("utf-16-le")
-    assert "[Console]::In.ReadLine()" in launch_script
+    assert "[IO.StreamReader]::new('/dev/stdin'" in launch_script
+    assert "$__tf_input=$__tf_reader.ReadLine()" in launch_script
+    assert "[Console]::In.ReadLine()" not in launch_script
+    assert "[Console]::OpenStandardInput()" not in launch_script
+    assert "$__tf_reader.Dispose()" in launch_script
     assert "[ScriptBlock]::Create($__tf_input)" in launch_script
     assert "/bin/stty -echo -icanon min 1 time 0" in launch_script
     assert "TFPWSH_LAUNCH_" in launch_script
@@ -195,7 +199,7 @@ def test_posix_launch_uses_console_input_without_native_line_editing(token_lengt
     assert (
         "$__tf_chunk='';$__tf_chunk_data='';$__tf_chunk_op='';"
         "$__tf_chunk_token='';$__tf_separator=-1;$__tf_input='';"
-        "$__tf_input=[Console]::In.ReadLine()" in launch_script
+        "$__tf_input=$__tf_reader.ReadLine()" in launch_script
     )
 
 
