@@ -81,6 +81,7 @@ class _PendingRecovery:
 class _PendingFinalization:
     correlation_id: str
     marker: bytes
+    input_echo: bytes
 
 
 class BashDialect:
@@ -303,13 +304,11 @@ class BashProtocol(DialectProtocol):
         token = _validate_token(self._token_factory())
         correlation_id = f"finalize_{token}"
         marker = _RECORD_SEPARATOR + f"TFBASH_FINALIZE_{token}".encode() + _UNIT_SEPARATOR
-        self._pending_finalization = _PendingFinalization(correlation_id, marker)
-        self._state = _ParserState.FINDING_FINALIZATION
         marker_text = marker[1:-1].decode("ascii")
-        return CommandFrame(
-            correlation_id,
-            f"printf '\\036{marker_text}\\037'\n".encode(),
-        )
+        input_bytes = f"printf '\\036{marker_text}\\037'\n".encode()
+        self._pending_finalization = _PendingFinalization(correlation_id, marker, input_bytes)
+        self._state = _ParserState.FINDING_FINALIZATION
+        return CommandFrame(correlation_id, input_bytes)
 
     def feed(self, data: bytes) -> tuple[DialectEvent, ...]:
         if self._state is _ParserState.CLOSED:
@@ -526,7 +525,8 @@ class BashProtocol(DialectProtocol):
         pending = self._require_pending_finalization()
         marker_at = self._buffer.find(pending.marker)
         if marker_at < 0:
-            safe_bytes = len(self._buffer) - len(pending.marker) + 1
+            retained_tail = len(pending.marker) - 1 + len(pending.input_echo) + 1
+            safe_bytes = len(self._buffer) - retained_tail
             if safe_bytes > 0:
                 visible = bytes(self._buffer[:safe_bytes])
                 if visible:
@@ -534,9 +534,9 @@ class BashProtocol(DialectProtocol):
                 del self._buffer[:safe_bytes]
             return False
         if marker_at:
-            events.append(
-                DialectEvent(DialectEventKind.OUTPUT, data=bytes(self._buffer[:marker_at]))
-            )
+            visible = self._strip_finalization_input_echo(bytes(self._buffer[:marker_at]), pending)
+            if visible:
+                events.append(DialectEvent(DialectEventKind.OUTPUT, data=visible))
         del self._buffer[: marker_at + len(pending.marker)]
         self._state = _ParserState.FINALIZATION_PROMPT
         return True
@@ -570,6 +570,15 @@ class BashProtocol(DialectProtocol):
         self._pending_finalization = None
         self._state = _ParserState.READY
         return True
+
+    @staticmethod
+    def _strip_finalization_input_echo(data: bytes, pending: _PendingFinalization) -> bytes:
+        echoed_line = pending.input_echo.removesuffix(b"\n")
+        for line_ending in (b"\r\n", b"\n", b"\r"):
+            suffix = echoed_line + line_ending
+            if data.endswith(suffix):
+                return data[: -len(suffix)]
+        return data
 
     def _find_recovery_record(self, events: list[DialectEvent]) -> bool:
         recovery = self._require_pending_recovery()

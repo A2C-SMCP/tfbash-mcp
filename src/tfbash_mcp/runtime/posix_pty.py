@@ -85,12 +85,13 @@ class PexpectPosixSession(RuntimeSession):
 
 
 class PexpectPosixPtyTransport:
-    """The sole nonblocking byte reader/writer for each pexpect PTY."""
+    """The sole nonblocking byte reader/writer for each POSIX PTY."""
 
     runtime_name = RuntimeName.POSIX_BASH
 
-    def __init__(self) -> None:
+    def __init__(self, *, use_posix_spawn: bool = False) -> None:
         self._transport_token = object()
+        self._use_posix_spawn = use_posix_spawn
         self._pending_cleanup_lock = Lock()
         self._pending_file_descriptors: list[int] = []
         self._pending_pexpect_children: list[Any] = []
@@ -115,26 +116,31 @@ class PexpectPosixPtyTransport:
             if cancel_signal is not None and cancel_signal.is_set():
                 raise TransportError("POSIX PTY spawn was cancelled")
             ownership.reserve()
-            child = pexpect.spawn(
-                request.executable,
-                list(request.arguments),
-                timeout=0,
-                maxread=65_536,
-                cwd=request.cwd,
-                env=dict(request.environment),
-                echo=False,
-                encoding=None,
-                use_poll=True,
-                preexec_fn=ownership.child_setup,
-            )
-            ownership.attach(int(child.pid), int(child.child_fd))
+            if self._use_posix_spawn:
+                transport_fd, process_id = self._posix_spawn(request)
+                ownership.attach(process_id, transport_fd)
+            else:
+                child = pexpect.spawn(
+                    request.executable,
+                    list(request.arguments),
+                    timeout=0,
+                    maxread=65_536,
+                    cwd=request.cwd,
+                    env=dict(request.environment),
+                    echo=False,
+                    encoding=None,
+                    use_poll=True,
+                    preexec_fn=ownership.child_setup,
+                )
+                ownership.attach(int(child.pid), int(child.child_fd))
             if cancel_signal is not None and cancel_signal.is_set():
                 raise TransportError("POSIX PTY spawn was cancelled")
             if deadline is not None and time.monotonic() >= deadline:
                 raise TransportError("POSIX PTY spawn deadline expired")
-            transport_fd = os.dup(child.child_fd)
+            if child is not None:
+                transport_fd = os.dup(child.child_fd)
+                self._release_pexpect_master(child)
             os.set_blocking(transport_fd, False)
-            self._release_pexpect_master(child)
             return PexpectPosixSession(
                 session_id=f"posix_{ownership.ownership_id}",
                 file_descriptor=transport_fd,
@@ -154,6 +160,51 @@ class PexpectPosixPtyTransport:
             if isinstance(error, TransportError):
                 raise
             raise TransportError("failed to spawn POSIX PTY") from error
+
+    @staticmethod
+    def _posix_spawn(request: SpawnRequest) -> tuple[int, int]:
+        """Spawn without fork so macOS remains safe after host threads exist."""
+
+        import termios
+
+        master_fd, slave_fd = os.openpty()
+        try:
+            attributes = termios.tcgetattr(slave_fd)
+            attributes[3] &= ~(termios.ECHO | termios.ECHONL)
+            termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
+            terminal_path = os.ttyname(slave_fd)
+            file_actions = (
+                (os.POSIX_SPAWN_OPEN, 0, terminal_path, os.O_RDWR, 0),
+                (os.POSIX_SPAWN_DUP2, 0, 1),
+                (os.POSIX_SPAWN_DUP2, 0, 2),
+                (os.POSIX_SPAWN_CLOSE, master_fd),
+                (os.POSIX_SPAWN_CLOSE, slave_fd),
+            )
+            launcher = "/bin/sh"
+            arguments = (
+                launcher,
+                "-c",
+                'cd "$1" || exit 126; executable=$2; prompt=$3; shift 3; '
+                'PS1=$prompt; export PS1; exec "$executable" "$@"',
+                "tfbash-posix-spawn",
+                request.cwd,
+                request.executable,
+                request.environment.get("PS1", ""),
+                *request.arguments,
+            )
+            process_id = os.posix_spawn(
+                launcher,
+                arguments,
+                dict(request.environment),
+                file_actions=file_actions,
+                setsid=True,
+            )
+        except Exception:
+            os.close(master_fd)
+            raise
+        finally:
+            os.close(slave_fd)
+        return master_fd, process_id
 
     def retry_failed_spawn_cleanup(self) -> None:
         """Retry resources retained after a failed spawn rollback.

@@ -264,6 +264,8 @@ def test_correlated_finalization_preserves_cleanup_output_at_every_split() -> No
         token = finalization.correlation_id.removeprefix("finalize_")
         payload = (
             b"ONTERM\r\n"
+            + finalization.input_bytes.removesuffix(b"\n")
+            + b"\r\n"
             + b"\x1eTFBASH_FINALIZE_"
             + token.encode()
             + b"\x1fjob-finished\r\n"

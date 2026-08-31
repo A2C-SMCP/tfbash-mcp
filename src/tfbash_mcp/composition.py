@@ -201,7 +201,7 @@ def _build_posix_runtime(
     executable: str | None = None,
 ) -> RuntimeProfile:
     shell_dialect = _dialect(dialect, executable=executable, windows=False)
-    transport = PexpectPosixPtyTransport()
+    transport = PexpectPosixPtyTransport(use_posix_spawn=platform.system() == "Darwin")
     supervisor = PosixProcessSupervisor(shutdown_grace_ms=shutdown_grace_ms)
     if dialect is RuntimeDialectName.BASH:
         return PosixBashProfile(
@@ -267,10 +267,7 @@ def _dialect(
             or (r"C:\Program Files\Git\bin\bash.exe" if windows else "/bin/bash"),
             windows_paths=windows,
             shell_prelude=(
-                "stty -echo 2>/dev/null || :; "
-                "bind 'set enable-bracketed-paste off' 2>/dev/null || :; "
-                if windows
-                else ""
+                "bind 'set enable-bracketed-paste off' 2>/dev/null || :; " if windows else ""
             ),
         )
     if dialect is RuntimeDialectName.ZSH:
