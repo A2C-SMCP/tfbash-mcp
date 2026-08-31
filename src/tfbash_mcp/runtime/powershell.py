@@ -37,7 +37,7 @@ _VT_SEQUENCE = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x
 _MAX_WINDOWS_EXIT_CODE = 4_294_967_295
 _CONTROL_ECHO_PREFIX_BYTES = 256
 _PRIVATE_FRAGMENT_BYTES = 8
-_POSIX_INPUT_CHUNK_CHARACTERS = 512
+_POSIX_INPUT_CHUNK_CHARACTERS = 96
 
 
 class _ParserState(Enum):
@@ -140,7 +140,7 @@ class PowerShellDialect:
             chunk_prefix = _powershell_literal(f"__TFPWSH_CHUNK_{session_token}:")
             launch_script += (
                 f";$__tf_chunk_prefix={chunk_prefix};"
-                "$__tf_payload='';$__tf_payload_token='';"
+                "$__tf_payload=[Text.StringBuilder]::new();$__tf_payload_token='';"
                 "& /bin/stty -echo -icanon min 1 time 0;"
                 "if($LASTEXITCODE -ne 0){throw 'failed to configure the POSIX terminal'};"
                 f"[Console]::Out.Write({prompt});"
@@ -156,23 +156,25 @@ class PowerShellDialect:
                 "$__tf_chunk_data=$__tf_chunk.Substring($__tf_separator+1);"
                 "if(($__tf_chunk_op -ceq 'S') -and "
                 "($__tf_chunk_token -cmatch '^[A-Za-z0-9]{16,64}$')){"
-                "$__tf_payload_token=$__tf_chunk_token;$__tf_payload=$__tf_chunk_data;"
+                "$null=$__tf_payload.Clear();$null=$__tf_payload.Append($__tf_chunk_data);"
+                "$__tf_payload_token=$__tf_chunk_token;"
                 "$__tf_prompt_required=$false"
                 "}elseif(($__tf_chunk_op -ceq 'A') -and "
                 "($__tf_chunk_token -ceq $__tf_payload_token)){"
-                "$__tf_payload+=$__tf_chunk_data;$__tf_prompt_required=$false"
+                "$null=$__tf_payload.Append($__tf_chunk_data);"
+                "$__tf_prompt_required=$false"
                 "}elseif(($__tf_chunk_op -ceq 'X') -and "
                 "($__tf_chunk_token -ceq $__tf_payload_token)){"
-                "$__tf_payload_to_run=$__tf_payload;"
-                "$__tf_payload='';$__tf_payload_token='';"
+                "$__tf_payload_to_run=$__tf_payload.ToString();"
+                "$null=$__tf_payload.Clear();$__tf_payload_token='';"
                 "try{. ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString("
                 "[Convert]::FromBase64String($__tf_payload_to_run))))}"
                 "catch{[Console]::Error.WriteLine([string]$_)}"
                 "finally{$__tf_payload_to_run=''}"
-                "}else{$__tf_payload='';$__tf_payload_token=''}"
-                "}else{$__tf_payload='';$__tf_payload_token=''}"
+                "}else{$null=$__tf_payload.Clear();$__tf_payload_token=''}"
+                "}else{$null=$__tf_payload.Clear();$__tf_payload_token=''}"
                 "}else{"
-                "$__tf_payload='';$__tf_payload_token='';"
+                "$null=$__tf_payload.Clear();$__tf_payload_token='';"
                 "try{. ([ScriptBlock]::Create($__tf_input))}"
                 "catch{[Console]::Error.WriteLine([string]$_)}"
                 "};"

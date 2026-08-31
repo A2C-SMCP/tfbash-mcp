@@ -148,9 +148,11 @@ def test_prepare_session_builds_pinned_noninteractive_pwsh_launch() -> None:
     assert isinstance(plan.protocol, PowerShellProtocol)
 
 
-def test_posix_launch_uses_console_input_without_native_line_editing() -> None:
+@pytest.mark.parametrize("token_length", [16, 32, 64])
+def test_posix_launch_uses_console_input_without_native_line_editing(token_length: int) -> None:
+    session_token = "A" * token_length
     plan = PowerShellDialect(
-        token_factory=_token_factory("A" * 32),
+        token_factory=_token_factory(session_token),
         default_executable="/usr/bin/pwsh",
         windows_paths=False,
     ).prepare_session(
@@ -169,19 +171,26 @@ def test_posix_launch_uses_console_input_without_native_line_editing() -> None:
     assert "TFPWSH_LAUNCH_" in launch_script
     input_lines = plan.launch.initial_input.splitlines()
     assert len(input_lines) > 2
-    assert max(map(len, input_lines)) < 1024
+    assert max(map(len, input_lines)) < 256
     payload_chunks = re.findall(
-        rb"__TFPWSH_CHUNK_A{32}:[SA]:A{32}:([A-Za-z0-9+/=]+)",
+        rb"__TFPWSH_CHUNK_"
+        + re.escape(session_token.encode())
+        + rb":[SA]:"
+        + re.escape(session_token.encode())
+        + rb":([A-Za-z0-9+/=]+)",
         plan.launch.initial_input,
     )
     reconstructed = base64.b64decode(b"".join(payload_chunks)).decode("utf-8")
     assert "TFPWSH_READY_" in reconstructed
     assert "function global:prompt" in reconstructed
-    assert input_lines[-1] == b"__TFPWSH_CHUNK_" + b"A" * 32 + b":X:" + b"A" * 32 + b":"
+    assert (
+        input_lines[-1]
+        == b"__TFPWSH_CHUNK_" + session_token.encode() + b":X:" + session_token.encode() + b":"
+    )
     assert "$__tf_prompt_required=$false" in launch_script
     assert (
-        "$__tf_payload='';$__tf_payload_token='';try{. ([ScriptBlock]::Create($__tf_input))}"
-        in launch_script
+        "$null=$__tf_payload.Clear();$__tf_payload_token='';"
+        "try{. ([ScriptBlock]::Create($__tf_input))}" in launch_script
     )
     assert (
         "$__tf_chunk='';$__tf_chunk_data='';$__tf_chunk_op='';"
@@ -214,7 +223,7 @@ def test_posix_large_command_chunks_do_not_require_intermediate_prompts() -> Non
     lines = frame.input_bytes.splitlines()
     prefix = f"__TFPWSH_CHUNK_{session_token}:".encode()
     assert len(lines) > 500
-    assert max(map(len, lines)) < 1024
+    assert max(map(len, lines)) < 256
     assert all(line.startswith(prefix) for line in lines)
     assert lines[0].startswith(prefix + f"S:{command_token}:".encode())
     assert all(line.startswith(prefix + f"A:{command_token}:".encode()) for line in lines[1:-1])
