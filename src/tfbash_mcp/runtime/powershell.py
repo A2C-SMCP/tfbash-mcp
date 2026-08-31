@@ -1,4 +1,4 @@
-"""Pure PowerShell 7.6 dialect framing for the Windows runtime profile.
+"""Pure PowerShell Desktop/Core dialect framing for native terminal backends.
 
 The dialect owns only launch construction and an incremental byte parser.  It
 does not import pywinpty or any Win32 API and never owns a ConPTY handle or a
@@ -14,7 +14,7 @@ import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
-from pathlib import PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 
 from tfbash_mcp.runtime.contracts import (
     CancellationSignal,
@@ -25,7 +25,6 @@ from tfbash_mcp.runtime.contracts import (
     DialectName,
     DialectProtocol,
     DialectSessionPlan,
-    RuntimeName,
     ShellStartRequest,
     SpawnRequest,
 )
@@ -38,6 +37,7 @@ _VT_SEQUENCE = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x
 _MAX_WINDOWS_EXIT_CODE = 4_294_967_295
 _CONTROL_ECHO_PREFIX_BYTES = 256
 _PRIVATE_FRAGMENT_BYTES = 8
+_POSIX_INPUT_CHUNK_CHARACTERS = 96
 
 
 class _ParserState(Enum):
@@ -91,7 +91,6 @@ class _PendingFinalization:
 class PowerShellDialect:
     """Create isolated PowerShell launch/parser pairs without a ConPTY import."""
 
-    runtime_name = RuntimeName.WINDOWS_PWSH
     dialect_name = DialectName.PWSH
     default_executable = r"C:\Program Files\PowerShell\7\pwsh.exe"
 
@@ -100,11 +99,15 @@ class PowerShellDialect:
         *,
         token_factory: Callable[[], str] | None = None,
         max_control_bytes: int = 65_536,
+        default_executable: str = r"C:\Program Files\PowerShell\7\pwsh.exe",
+        windows_paths: bool = True,
     ) -> None:
         if max_control_bytes < 1024:
             raise ValueError("max_control_bytes must be at least 1024")
         self._token_factory = token_factory or (lambda: secrets.token_hex(16))
         self._max_control_bytes = max_control_bytes
+        self.default_executable = default_executable
+        self._windows_paths = windows_paths
 
     def prepare_session(
         self,
@@ -117,12 +120,13 @@ class PowerShellDialect:
             raise DialectProtocolError("PowerShell session preparation deadline expired")
         if cancel_signal is not None and cancel_signal.is_set():
             raise DialectProtocolError("PowerShell session preparation was cancelled")
-        _validate_start_request(request)
+        _validate_start_request(request, windows=self._windows_paths)
         session_token = _validate_token(self._token_factory())
         protocol = PowerShellProtocol(
             session_token=session_token,
             token_factory=self._token_factory,
             max_control_bytes=self._max_control_bytes,
+            windows_paths=self._windows_paths,
         )
         if cancel_signal is not None and cancel_signal.is_set():
             raise DialectProtocolError("PowerShell session preparation was cancelled")
@@ -131,6 +135,57 @@ class PowerShellDialect:
             + ";"
             + _write_static_record(protocol._launch_marker[1:-1].decode("ascii"))
         )
+        if not self._windows_paths:
+            prompt = _powershell_literal(protocol._prompt.decode("ascii"))
+            chunk_prefix = _powershell_literal(f"__TFPWSH_CHUNK_{session_token}:")
+            launch_script += (
+                f";$__tf_chunk_prefix={chunk_prefix};"
+                "$__tf_payload=[Text.StringBuilder]::new();$__tf_payload_token='';"
+                "& /bin/stty -echo -icanon min 1 time 0;"
+                "if($LASTEXITCODE -ne 0){throw 'failed to configure the POSIX terminal'};"
+                "$__tf_reader=[IO.StreamReader]::new('/dev/stdin',"
+                "[Text.Encoding]::UTF8,$false,1024);"
+                f"[Console]::Out.Write({prompt});"
+                "$__tf_input=$__tf_reader.ReadLine();"
+                "while($null -ne $__tf_input){"
+                "$__tf_prompt_required=$true;"
+                "if($__tf_input.StartsWith($__tf_chunk_prefix,[StringComparison]::Ordinal)){"
+                "$__tf_chunk=$__tf_input.Substring($__tf_chunk_prefix.Length);"
+                "$__tf_separator=$__tf_chunk.IndexOf(':',2);"
+                "if($__tf_separator -gt 2){"
+                "$__tf_chunk_op=$__tf_chunk.Substring(0,1);"
+                "$__tf_chunk_token=$__tf_chunk.Substring(2,$__tf_separator-2);"
+                "$__tf_chunk_data=$__tf_chunk.Substring($__tf_separator+1);"
+                "if(($__tf_chunk_op -ceq 'S') -and "
+                "($__tf_chunk_token -cmatch '^[A-Za-z0-9]{16,64}$')){"
+                "$null=$__tf_payload.Clear();$null=$__tf_payload.Append($__tf_chunk_data);"
+                "$__tf_payload_token=$__tf_chunk_token;"
+                "$__tf_prompt_required=$false"
+                "}elseif(($__tf_chunk_op -ceq 'A') -and "
+                "($__tf_chunk_token -ceq $__tf_payload_token)){"
+                "$null=$__tf_payload.Append($__tf_chunk_data);"
+                "$__tf_prompt_required=$false"
+                "}elseif(($__tf_chunk_op -ceq 'X') -and "
+                "($__tf_chunk_token -ceq $__tf_payload_token)){"
+                "$__tf_payload_to_run=$__tf_payload.ToString();"
+                "$null=$__tf_payload.Clear();$__tf_payload_token='';"
+                "try{. ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString("
+                "[Convert]::FromBase64String($__tf_payload_to_run))))}"
+                "catch{[Console]::Error.WriteLine([string]$_)}"
+                "finally{$__tf_payload_to_run=''}"
+                "}else{$null=$__tf_payload.Clear();$__tf_payload_token=''}"
+                "}else{$null=$__tf_payload.Clear();$__tf_payload_token=''}"
+                "}else{"
+                "$null=$__tf_payload.Clear();$__tf_payload_token='';"
+                "try{. ([ScriptBlock]::Create($__tf_input))}"
+                "catch{[Console]::Error.WriteLine([string]$_)}"
+                "};"
+                f"if($__tf_prompt_required){{[Console]::Out.Write({prompt})}};"
+                "$__tf_chunk='';$__tf_chunk_data='';$__tf_chunk_op='';"
+                "$__tf_chunk_token='';$__tf_separator=-1;$__tf_input='';"
+                "$__tf_input=$__tf_reader.ReadLine()};"
+                "$__tf_reader.Dispose()"
+            )
         launch = DialectLaunch(
             spawn=SpawnRequest(
                 executable=request.executable,
@@ -159,10 +214,13 @@ class PowerShellProtocol(DialectProtocol):
         session_token: str,
         token_factory: Callable[[], str],
         max_control_bytes: int,
+        windows_paths: bool = True,
     ) -> None:
         self._session_token = session_token
         self._token_factory = token_factory
         self._max_control_bytes = max_control_bytes
+        self._windows_paths = windows_paths
+        self._line_ending = b"\r\n" if windows_paths else b"\n"
         self._prompt = f"__TFPWSH_PROMPT_{session_token}__> ".encode()
         self._launch_marker = (
             _RECORD_SEPARATOR + f"TFPWSH_LAUNCH_{session_token}".encode() + _UNIT_SEPARATOR
@@ -186,17 +244,14 @@ class PowerShellProtocol(DialectProtocol):
             startup_block = (
                 "$global:LASTEXITCODE=0;$__tf_success=$true;"
                 "try{" + _dot_source_utf8(startup_command, "$__tf_success") + "}"
-                "catch{$__tf_success=$false};" + _exit_code_assignment("$__tf_rc", "$__tf_success")
+                "catch{$__tf_success=$false};"
+                + _exit_code_assignment("$__tf_rc", "$__tf_success", windows=self._windows_paths)
             )
         script = (
             "$__tf_probe=0;$__tf_rc=[uint32]0;"
             "$__tf_version=[string]$PSVersionTable.PSVersion;"
-            "if(($PSVersionTable.PSEdition -cne 'Core') -or "
-            "($PSVersionTable.PSVersion.Major -ne 7) -or "
-            "($PSVersionTable.PSVersion.Minor -ne 6) -or "
-            "(-not $IsWindows) -or "
-            "([string][Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture "
-            "-cne 'X64')){$__tf_probe=1};"
+            "if(($PSVersionTable.PSEdition -cne 'Core') -and "
+            "($PSVersionTable.PSEdition -cne 'Desktop')){$__tf_probe=1};"
             "if($__tf_probe -eq 0){try{" + _encoding_assignment() + "}catch{$__tf_probe=2}};"
             "if($__tf_probe -eq 0){" + startup_block + "};"
             "if($__tf_probe -eq 0){try{"
@@ -217,7 +272,12 @@ class PowerShellProtocol(DialectProtocol):
                 ),
             )
         )
-        return _encoded_invocation(script, self._session_token)
+        return _encoded_invocation(
+            script,
+            self._session_token,
+            self._line_ending,
+            chunk_session_token=(None if self._windows_paths else self._session_token),
+        )
 
     def wrap_command(self, command: str) -> CommandFrame:
         if self._state is not _ParserState.READY or self._pending_command is not None:
@@ -232,7 +292,7 @@ class PowerShellProtocol(DialectProtocol):
             + ";$global:LASTEXITCODE=0;$__tf_success=$true;"
             "try{" + _dot_source_utf8(command, "$__tf_success") + "}"
             "catch{$__tf_success=$false;[Console]::Error.WriteLine([string]$_)};"
-            + _exit_code_assignment("$__tf_rc", "$__tf_success")
+            + _exit_code_assignment("$__tf_rc", "$__tf_success", windows=self._windows_paths)
             + ";"
             + _encoding_assignment()
             + ";"
@@ -250,7 +310,15 @@ class PowerShellProtocol(DialectProtocol):
                 ),
             )
         )
-        frame = CommandFrame(correlation_id, _encoded_invocation(script, token))
+        frame = CommandFrame(
+            correlation_id,
+            _encoded_invocation(
+                script,
+                token,
+                self._line_ending,
+                chunk_session_token=(None if self._windows_paths else self._session_token),
+            ),
+        )
         self._pending_command = _PendingCommand(correlation_id, begin_marker, result_prefix)
         self._state = _ParserState.WAITING_BEGIN
         return frame
@@ -264,7 +332,7 @@ class PowerShellProtocol(DialectProtocol):
             _RECORD_SEPARATOR + f"TFPWSH_RECOVER_BEGIN_{token}".encode() + _UNIT_SEPARATOR
         )
         result_prefix = _RECORD_SEPARATOR + f"TFPWSH_RECOVER_END_{token}:".encode()
-        input_bytes = f"{self._control_function} R {token}\r\n".encode("ascii")
+        input_bytes = f"{self._control_function} R {token}".encode("ascii") + self._line_ending
         self._pending_recovery = _PendingRecovery(
             pending.correlation_id,
             begin_marker,
@@ -290,7 +358,7 @@ class PowerShellProtocol(DialectProtocol):
         token = _validate_token(self._token_factory())
         correlation_id = f"finalize_{token}"
         marker = _RECORD_SEPARATOR + f"TFPWSH_FINALIZE_{token}".encode() + _UNIT_SEPARATOR
-        input_bytes = f"{self._control_function} F {token}\r\n".encode("ascii")
+        input_bytes = f"{self._control_function} F {token}".encode("ascii") + self._line_ending
         self._pending_finalization = _PendingFinalization(
             correlation_id,
             marker,
@@ -423,13 +491,13 @@ class PowerShellProtocol(DialectProtocol):
         probe = int(fields[0])
         startup_rc = _parse_exit_code(fields[1], "startup")
         if probe == 1:
-            raise UnsupportedShell("executable did not report PowerShell Core 7.6 on Windows x64")
+            raise UnsupportedShell("executable did not report an admitted PowerShell runtime")
         if probe == 2:
             raise UnsupportedShell("PowerShell could not establish the UTF-8 shell contract")
         if probe != 0:
             raise DialectProtocolError("invalid PowerShell compatibility probe result")
         version = _decode_text_field(fields[2], "shell version")
-        cwd = _decode_cwd(fields[3])
+        cwd = _decode_cwd(fields[3], windows=self._windows_paths)
         if not version:
             raise UnsupportedShell("PowerShell runtime reported an empty version")
         if startup_rc != 0:
@@ -470,7 +538,7 @@ class PowerShellProtocol(DialectProtocol):
         self._pending_result = _PendingResult(
             pending.correlation_id,
             _parse_exit_code(fields[0], "command"),
-            _decode_cwd(fields[1]),
+            _decode_cwd(fields[1], windows=self._windows_paths),
         )
         self._prompt_separator_pending = True
         self._state = _ParserState.FINALIZING
@@ -613,7 +681,11 @@ class PowerShellProtocol(DialectProtocol):
         if record is None:
             return False
         recovery = self._require_pending_recovery()
-        self._pending_result = _PendingResult(recovery.correlation_id, 0, _decode_cwd(record))
+        self._pending_result = _PendingResult(
+            recovery.correlation_id,
+            0,
+            _decode_cwd(record, windows=self._windows_paths),
+        )
         self._prompt_separator_pending = True
         self._state = _ParserState.FINALIZING
         return True
@@ -888,14 +960,32 @@ def _encoded_command(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _encoded_invocation(script: str, token: str) -> bytes:
+def _encoded_invocation(
+    script: str,
+    token: str,
+    line_ending: bytes,
+    *,
+    chunk_session_token: str | None = None,
+) -> bytes:
     payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
     sentinel = f"TFPWSH_INPUT_{token}"
-    return (
+    invocation = (
         f"$null={_powershell_literal(sentinel)};. ([ScriptBlock]::Create("
         "[Text.Encoding]::UTF8.GetString("
-        f"[Convert]::FromBase64String('{payload}'))))\r\n"
+        f"[Convert]::FromBase64String('{payload}'))))"
     ).encode("ascii")
+    if chunk_session_token is not None and len(payload) > _POSIX_INPUT_CHUNK_CHARACTERS:
+        private_script = f"$null={_powershell_literal(sentinel)};{script}"
+        payload = base64.b64encode(private_script.encode("utf-8")).decode("ascii")
+        wire_prefix = f"__TFPWSH_CHUNK_{chunk_session_token}:"
+        lines = [
+            f"{wire_prefix}{'S' if offset == 0 else 'A'}:{token}:"
+            f"{payload[offset : offset + _POSIX_INPUT_CHUNK_CHARACTERS]}"
+            for offset in range(0, len(payload), _POSIX_INPUT_CHUNK_CHARACTERS)
+        ]
+        lines.append(f"{wire_prefix}X:{token}:")
+        return line_ending.join(line.encode("ascii") for line in lines) + line_ending
+    return invocation + line_ending
 
 
 def _dot_source_utf8(script: str, status_target: str | None = None) -> str:
@@ -918,12 +1008,13 @@ def _encoding_assignment() -> str:
     )
 
 
-def _exit_code_assignment(target: str, success: str) -> str:
+def _exit_code_assignment(target: str, success: str, *, windows: bool = True) -> str:
+    maximum = _MAX_WINDOWS_EXIT_CODE if windows else 255
     return (
         "$__tf_native=[int64]$global:LASTEXITCODE;"
         "if($__tf_native -lt 0){$__tf_native+=4294967296};"
         f"if({success}){{{target}=[uint32]0}}"
-        f"elseif(($__tf_native -ne 0) -and ($__tf_native -le {_MAX_WINDOWS_EXIT_CODE}))"
+        f"elseif(($__tf_native -ne 0) -and ($__tf_native -le {maximum}))"
         f"{{{target}=[uint32]$__tf_native}}else{{{target}=[uint32]1}}"
     )
 
@@ -1051,9 +1142,10 @@ def _decode_text_field(field: bytes, label: str) -> str:
         raise DialectProtocolError(f"invalid {label} in PowerShell control record") from error
 
 
-def _decode_cwd(field: bytes) -> str:
+def _decode_cwd(field: bytes, *, windows: bool = True) -> str:
     cwd = _decode_text_field(field, "cwd")
-    if not cwd or "\x00" in cwd or not PureWindowsPath(cwd).is_absolute():
+    absolute = PureWindowsPath(cwd).is_absolute() if windows else PurePosixPath(cwd).is_absolute()
+    if not cwd or "\x00" in cwd or not absolute:
         raise DialectProtocolError("PowerShell reported an invalid cwd")
     return cwd
 
@@ -1070,24 +1162,30 @@ def _validate_command(command: str) -> None:
     _validate_utf8(command, "command")
 
 
-def _validate_start_request(request: ShellStartRequest) -> None:
+def _validate_start_request(request: ShellStartRequest, *, windows: bool = True) -> None:
     for label, value in (("executable", request.executable), ("cwd", request.cwd)):
         _validate_utf8(value, label)
-        if not value or "\x00" in value or not PureWindowsPath(value).is_absolute():
-            raise UnsupportedShell(f"PowerShell {label} must be a NUL-free Windows absolute path")
+        absolute = (
+            PureWindowsPath(value).is_absolute() if windows else PurePosixPath(value).is_absolute()
+        )
+        if not value or "\x00" in value or not absolute:
+            path_kind = "Windows" if windows else "POSIX"
+            raise UnsupportedShell(
+                f"PowerShell {label} must be a NUL-free native {path_kind} absolute path"
+            )
     if request.startup_command is not None:
         _validate_command(request.startup_command)
-    _validate_environment(request.environment)
+    _validate_environment(request.environment, windows=windows)
 
 
-def _validate_environment(environment: Mapping[str, str]) -> None:
+def _validate_environment(environment: Mapping[str, str], *, windows: bool = True) -> None:
     normalized: set[str] = set()
     for key, value in environment.items():
         _validate_utf8(key, "environment key")
         _validate_utf8(value, "environment value")
         if not key or "\x00" in key or "\x00" in value:
             raise DialectProtocolError("environment keys and values must be NUL-free")
-        comparable = key.casefold()
+        comparable = key.casefold() if windows else key
         if comparable in normalized:
             raise DialectProtocolError("PowerShell environment keys must be unique ignoring case")
         normalized.add(comparable)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 
@@ -13,6 +15,7 @@ from tfbash_mcp.domain.models import (
     Execution,
     ExecutionSnapshot,
     ExecutionState,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellState,
     SystemClock,
@@ -20,8 +23,10 @@ from tfbash_mcp.domain.models import (
 from tfbash_mcp.domain.registry import ShellRegistry
 from tfbash_mcp.domain.worker import CloseRequest, ShellWorker, WorkerConfig
 from tfbash_mcp.runtime.contracts import ControlIntent, ShellStartRequest
-from tfbash_mcp.runtime.errors import CleanupTimeout, RuntimeBoundaryError
+from tfbash_mcp.runtime.errors import CleanupTimeout, RuntimeBoundaryError, StartupHandshakeError
 from tfbash_mcp.runtime.profile import RuntimeProfile
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,7 @@ class _OpenAttempt:
     done: Event = field(default_factory=Event)
     snapshot: ShellSnapshot | None = None
     error: Exception | None = None
+    failure_stage: str | None = None
 
 
 @dataclass(slots=True)
@@ -67,6 +73,32 @@ class _ShutdownCleanupAttempt:
     close_action: CloseRequest | None
     done: Event = field(default_factory=Event)
     error: Exception | None = None
+
+
+def _exception_type_chain(error: BaseException) -> tuple[str, ...]:
+    chain: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(type(current).__name__)
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    return tuple(chain)
+
+
+def _startup_handshake_phase(error: BaseException) -> str | None:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, StartupHandshakeError):
+            return current.phase
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    return None
 
 
 class CommandShellManager:
@@ -152,6 +184,7 @@ class CommandShellManager:
     def _run_open_attempt(self, attempt: _OpenAttempt) -> None:
         shell: CommandShell | None = None
         worker: ShellWorker | None = None
+        stage = "dialect-prepare"
         try:
             plan = self._profile.dialect.prepare_session(
                 attempt.request,
@@ -162,7 +195,9 @@ class CommandShellManager:
                 raise RuntimeBoundaryError(
                     "shell startup deadline expired during dialect preparation"
                 )
+            stage = "registry-create"
             shell = self._registry.create_shell(cwd=attempt.request.cwd)
+            stage = "runtime-spawn"
             worker = ShellWorker(
                 shell=shell,
                 registry=self._registry,
@@ -176,7 +211,9 @@ class CommandShellManager:
             )
             if attempt.cancelled.is_set():
                 raise RuntimeBoundaryError("shell startup was cancelled during spawn")
+            stage = "startup-handshake"
             worker.start(plan, startup_deadline_ms=attempt.deadline_ms)
+            stage = "publish"
             with self._lock:
                 if (
                     self._closed
@@ -207,7 +244,18 @@ class CommandShellManager:
                     self._pending_cleanup[shell.shell_id] = worker
                     self._reaper_wakeup.set()
                 attempt.error = error
+                attempt.failure_stage = stage
                 self._open_attempts.pop(attempt.attempt_id, None)
+            try:
+                _LOGGER.error(
+                    "Shell open attempt failed: attempt_id=%d stage=%s "
+                    "error_chain=%s handshake_phase=%s",
+                    attempt.attempt_id,
+                    attempt.failure_stage or "unknown",
+                    "<-".join(_exception_type_chain(error)),
+                    _startup_handshake_phase(error) or "none",
+                )
+            finally:
                 attempt.done.set()
 
     def exec(
@@ -348,6 +396,18 @@ class CommandShellManager:
 
     def snapshots(self) -> tuple[ShellSnapshot, ...]:
         return self._registry.snapshots()
+
+    def overview_snapshots(
+        self,
+        *,
+        max_output_characters: int,
+    ) -> tuple[ShellOverviewSnapshot, ...]:
+        return self._registry.overview_snapshots(
+            max_output_characters=max_output_characters,
+        )
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return self._registry.subscribe_overview_changes(listener)
 
     def shutdown(self) -> None:
         shutdown_deadline = time.monotonic() + self._config.worker.cleanup_deadline_ms / 1000

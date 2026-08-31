@@ -1062,48 +1062,16 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",
             "type": "string",
             "x-validUtf8": true
           },
-          "EnvironmentKind": {
-            "enum": [
-              "none",
-              "python-venv",
-              "conda",
-              "custom"
-            ],
-            "title": "EnvironmentKind",
-            "type": "string",
-            "x-validUtf8": true
-          },
-          "EnvironmentSummary": {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/EnvironmentKind"
-              },
-              "name": {
-                "pattern": "^[^\\x00]*$",
-                "title": "Name",
-                "type": "string",
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "title": "EnvironmentSummary",
-            "type": "object"
-          },
           "HostContext": {
             "additionalProperties": false,
             "properties": {
-              "environment": {
-                "$ref": "#/$defs/EnvironmentSummary"
-              },
               "mode": {
                 "$ref": "#/$defs/HostMode"
               },
@@ -1118,8 +1086,7 @@
             },
             "required": [
               "mode",
-              "workspace_root",
-              "environment"
+              "workspace_root"
             ],
             "title": "HostContext",
             "type": "object"
@@ -1527,15 +1494,6 @@
             "title": "Env",
             "type": "object"
           },
-          "shell": {
-            "default": "/bin/bash",
-            "pattern": "(?=^/)^[^\\x00]*$",
-            "title": "Shell",
-            "type": "string",
-            "x-nativeAbsolutePath": "linux",
-            "x-platform": "linux",
-            "x-validUtf8": true
-          },
           "startup_command": {
             "anyOf": [
               {
@@ -1563,6 +1521,7 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",
@@ -4286,48 +4245,16 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",
             "type": "string",
             "x-validUtf8": true
           },
-          "EnvironmentKind": {
-            "enum": [
-              "none",
-              "python-venv",
-              "conda",
-              "custom"
-            ],
-            "title": "EnvironmentKind",
-            "type": "string",
-            "x-validUtf8": true
-          },
-          "EnvironmentSummary": {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/EnvironmentKind"
-              },
-              "name": {
-                "pattern": "^[^\\x00]*$",
-                "title": "Name",
-                "type": "string",
-                "x-validUtf8": true
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "title": "EnvironmentSummary",
-            "type": "object"
-          },
           "HostContext": {
             "additionalProperties": false,
             "properties": {
-              "environment": {
-                "$ref": "#/$defs/EnvironmentSummary"
-              },
               "mode": {
                 "$ref": "#/$defs/HostMode"
               },
@@ -4342,8 +4269,7 @@
             },
             "required": [
               "mode",
-              "workspace_root",
-              "environment"
+              "workspace_root"
             ],
             "title": "HostContext",
             "type": "object"
@@ -4752,15 +4678,6 @@
             "type": "object",
             "x-caseInsensitiveUniqueKeys": true
           },
-          "shell": {
-            "default": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-            "pattern": "^[^\\x00]*$",
-            "title": "Shell",
-            "type": "string",
-            "x-nativeAbsolutePath": "windows",
-            "x-platform": "windows",
-            "x-validUtf8": true
-          },
           "startup_command": {
             "anyOf": [
               {
@@ -4788,6 +4705,7 @@
           "DialectName": {
             "enum": [
               "bash",
+              "zsh",
               "pwsh"
             ],
             "title": "DialectName",

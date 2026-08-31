@@ -474,10 +474,12 @@ def test_runtime_boundary_has_no_platform_or_mcp_imports() -> None:
         if source.name in {
             "posix_process.py",
             "posix_pty.py",
+            "posix_spawn_bootstrap.py",
             "windows_conpty.py",
             "windows_bootstrap.py",
             "windows_process.py",
             "windows_win32.py",
+            "resolver.py",
         }:
             continue
         tree = ast.parse(source.read_text())

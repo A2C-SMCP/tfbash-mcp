@@ -330,13 +330,13 @@ class PosixProcessSupervisor:
                 self._force_known_groups(concrete)
                 return CleanupResult(reaped=False, remaining_managed_processes=1)
             if not records:
-                if self._finalize_leader(concrete):
+                if self._finalize_leader_until(concrete, deadline):
                     self._close_terminal(concrete)
                     return CleanupResult(reaped=True, remaining_managed_processes=0)
                 self._force_known_groups(concrete)
                 return CleanupResult(reaped=False, remaining_managed_processes=1)
             if not self._outstanding_records(records, process_id):
-                if self._finalize_leader(concrete):
+                if self._finalize_leader_until(concrete, deadline):
                     self._close_terminal(concrete)
                     return CleanupResult(reaped=True, remaining_managed_processes=0)
                 self._force_known_groups(concrete)
@@ -368,7 +368,7 @@ class PosixProcessSupervisor:
 
             outstanding = self._outstanding_records(remaining, process_id)
             if not outstanding:
-                if not self._finalize_leader(concrete):
+                if not self._finalize_leader_until(concrete, deadline):
                     self._force_known_groups(concrete)
                     return CleanupResult(reaped=False, remaining_managed_processes=1)
                 self._close_terminal(concrete)
@@ -661,6 +661,21 @@ class PosixProcessSupervisor:
             return False
         ownership._mark_finalized()
         return True
+
+    def _finalize_leader_until(
+        self,
+        ownership: PosixProcessOwnership,
+        deadline: float,
+    ) -> bool:
+        """Retry a nonblocking leader reap while the cleanup budget remains."""
+
+        while True:
+            if self._finalize_leader(ownership):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
 
     @staticmethod
     def _close_terminal(ownership: PosixProcessOwnership) -> None:

@@ -148,6 +148,95 @@ def test_prepare_session_builds_pinned_noninteractive_pwsh_launch() -> None:
     assert isinstance(plan.protocol, PowerShellProtocol)
 
 
+@pytest.mark.parametrize("token_length", [16, 32, 64])
+def test_posix_launch_uses_stream_input_without_native_line_editing(token_length: int) -> None:
+    session_token = "A" * token_length
+    plan = PowerShellDialect(
+        token_factory=_token_factory(session_token),
+        default_executable="/usr/bin/pwsh",
+        windows_paths=False,
+    ).prepare_session(
+        ShellStartRequest(
+            executable="/usr/bin/pwsh",
+            cwd="/workspace",
+            environment={"PROJECT": "test"},
+            startup_command=None,
+        )
+    )
+
+    launch_script = base64.b64decode(plan.launch.spawn.arguments[5]).decode("utf-16-le")
+    assert "[IO.StreamReader]::new('/dev/stdin'" in launch_script
+    assert "$__tf_input=$__tf_reader.ReadLine()" in launch_script
+    assert "[Console]::In.ReadLine()" not in launch_script
+    assert "[Console]::OpenStandardInput()" not in launch_script
+    assert "$__tf_reader.Dispose()" in launch_script
+    assert "[ScriptBlock]::Create($__tf_input)" in launch_script
+    assert "/bin/stty -echo -icanon min 1 time 0" in launch_script
+    assert "TFPWSH_LAUNCH_" in launch_script
+    input_lines = plan.launch.initial_input.splitlines()
+    assert len(input_lines) > 2
+    assert max(map(len, input_lines)) < 256
+    payload_chunks = re.findall(
+        rb"__TFPWSH_CHUNK_"
+        + re.escape(session_token.encode())
+        + rb":[SA]:"
+        + re.escape(session_token.encode())
+        + rb":([A-Za-z0-9+/=]+)",
+        plan.launch.initial_input,
+    )
+    reconstructed = base64.b64decode(b"".join(payload_chunks)).decode("utf-8")
+    assert "TFPWSH_READY_" in reconstructed
+    assert "function global:prompt" in reconstructed
+    assert (
+        input_lines[-1]
+        == b"__TFPWSH_CHUNK_" + session_token.encode() + b":X:" + session_token.encode() + b":"
+    )
+    assert "$__tf_prompt_required=$false" in launch_script
+    assert (
+        "$null=$__tf_payload.Clear();$__tf_payload_token='';"
+        "try{. ([ScriptBlock]::Create($__tf_input))}" in launch_script
+    )
+    assert (
+        "$__tf_chunk='';$__tf_chunk_data='';$__tf_chunk_op='';"
+        "$__tf_chunk_token='';$__tf_separator=-1;$__tf_input='';"
+        "$__tf_input=$__tf_reader.ReadLine()" in launch_script
+    )
+
+
+def test_posix_large_command_chunks_do_not_require_intermediate_prompts() -> None:
+    session_token = "A" * 32
+    command_token = "B" * 32
+    plan = PowerShellDialect(
+        token_factory=_token_factory(session_token, command_token),
+        default_executable="/usr/bin/pwsh",
+        windows_paths=False,
+    ).prepare_session(
+        ShellStartRequest(
+            executable="/usr/bin/pwsh",
+            cwd="/workspace",
+            environment={"PROJECT": "test"},
+            startup_command=None,
+        )
+    )
+    protocol = cast(PowerShellProtocol, plan.protocol)
+    _ready(protocol, cwd="/workspace")
+    command = "x" * 262_144
+
+    frame = protocol.wrap_command(command)
+
+    lines = frame.input_bytes.splitlines()
+    prefix = f"__TFPWSH_CHUNK_{session_token}:".encode()
+    assert len(lines) > 500
+    assert max(map(len, lines)) < 256
+    assert all(line.startswith(prefix) for line in lines)
+    assert lines[0].startswith(prefix + f"S:{command_token}:".encode())
+    assert all(line.startswith(prefix + f"A:{command_token}:".encode()) for line in lines[1:-1])
+    assert lines[-1] == prefix + f"X:{command_token}:".encode()
+    encoded_chunks = [line.rsplit(b":", 1)[-1] for line in lines[:-1]]
+    private_script = base64.b64decode(b"".join(encoded_chunks)).decode("utf-8")
+    assert base64.b64encode(command.encode()).decode() in private_script
+
+
 def test_default_executable_is_drive_qualified_pwsh_7() -> None:
     assert PowerShellDialect.default_executable == r"C:\Program Files\PowerShell\7\pwsh.exe"
 
@@ -190,7 +279,7 @@ def test_startup_record_is_incremental_and_reports_unicode_cwd() -> None:
 def test_startup_fails_closed_for_wrong_runtime_encoding_and_command() -> None:
     incompatible = cast(PowerShellProtocol, _plan().protocol)
     _bootstrap(incompatible)
-    with pytest.raises(UnsupportedShell, match="7.6.*Windows x64"):
+    with pytest.raises(UnsupportedShell, match="admitted PowerShell runtime"):
         incompatible.feed(_startup_bytes(incompatible, probe=1))
 
     encoding = cast(PowerShellProtocol, _plan().protocol)

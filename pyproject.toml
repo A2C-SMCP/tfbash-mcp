@@ -1,11 +1,12 @@
 [project]
 name = "tfbash-mcp"
-version = "0.1.0"
-description = "A general-purpose Bash MCP server for agent systems"
+version = "0.2.0"
+description = "A cross-platform persistent Shell MCP server for agent systems"
 readme = "README.md"
 authors = [{ name = "A2C-SMCP" }]
 requires-python = ">=3.10,<3.13"
 dependencies = [
+    "anyio>=4.5.0,<5.0.0",
     "jsonschema>=4.25.0,<5.0.0",
     "mcp>=1.29.0,<2.0.0",
     "pexpect>=4.9.0,<5.0.0",

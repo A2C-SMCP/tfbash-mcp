@@ -1,4 +1,4 @@
-"""Immutable HostConfig and the process-level Runtime Profile selector."""
+"""Immutable HostConfig and the runtime-instance profile selector."""
 
 from __future__ import annotations
 
@@ -16,8 +16,17 @@ from tfbash_mcp.runtime.profile import RuntimePlatform, RuntimeProfile
 
 class RuntimeSelection(str, Enum):
     AUTO = "auto"
-    POSIX_BASH = "posix-bash"
-    WINDOWS_PWSH = "windows-pwsh"
+    BASH = "bash"
+    ZSH = "zsh"
+    PWSH = "pwsh"
+    # Python API aliases retained for source compatibility; CLI values changed in 0.2.0.
+    POSIX_BASH = "bash"
+    WINDOWS_PWSH = "pwsh"
+
+    @classmethod
+    def _missing_(cls, value: object) -> RuntimeSelection | None:
+        legacy = {"posix-bash": cls.BASH, "windows-pwsh": cls.PWSH}
+        return legacy.get(value) if isinstance(value, str) else None
 
 
 class NativePlatform(str, Enum):
@@ -31,28 +40,9 @@ class HostProfile(str, Enum):
     IDE = "ide"
 
 
-class EnvironmentKind(str, Enum):
-    NONE = "none"
-    PYTHON_VENV = "python-venv"
-    CONDA = "conda"
-    CUSTOM = "custom"
-
-
-@dataclass(frozen=True, slots=True)
-class EnvironmentSummary:
-    kind: EnvironmentKind = EnvironmentKind.NONE
-    name: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.name is not None:
-            _validate_utf8(self.name, label="environment name")
-            if not self.name.strip() or "\x00" in self.name:
-                raise RuntimeConfigurationError("environment name must be non-empty and NUL-free")
-
-
 @dataclass(frozen=True, slots=True)
 class HostConfig:
-    """Process-frozen host inputs, kept outside every Runtime Port."""
+    """Instance-frozen host inputs, kept outside every Runtime Port."""
 
     host_profile: HostProfile
     platform: NativePlatform
@@ -62,7 +52,6 @@ class HostConfig:
     default_shell: str | None = field(repr=False)
     startup_command: str | None = field(repr=False)
     environment: Mapping[str, str] = field(repr=False)
-    environment_summary: EnvironmentSummary
 
     def __post_init__(self) -> None:
         windows = self.platform is NativePlatform.WINDOWS
@@ -93,15 +82,9 @@ class HostConfig:
     def diagnostics(self) -> dict[str, object]:
         """Return the only host metadata safe for Agent-visible responses."""
 
-        environment: dict[str, object] = {
-            "kind": self.environment_summary.kind.value,
-        }
-        if self.environment_summary.name is not None:
-            environment["name"] = self.environment_summary.name
         return {
             "mode": self.host_profile.value,
             "workspace_root": self.workspace_root,
-            "environment": environment,
         }
 
 
@@ -118,7 +101,6 @@ class ShellOpenOverrides:
 
     cwd: str | None = None
     environment: Mapping[str, str] | None = None
-    executable: str | None = None
     startup_command: str | None | _StartupCommandUnset = STARTUP_COMMAND_UNSET
 
     def __post_init__(self) -> None:
@@ -139,9 +121,6 @@ class AgentRuntimeContext:
 
     def __post_init__(self) -> None:
         windows = self.platform is NativePlatform.WINDOWS
-        expected_dialect = DialectName.PWSH if windows else DialectName.BASH
-        if self.dialect is not expected_dialect:
-            raise RuntimeConfigurationError("native platform and command dialect must match")
         _validate_utf8(self.shell_version, label="shell version")
         if not self.shell_version or "\x00" in self.shell_version:
             raise RuntimeConfigurationError("shell version must be non-empty and NUL-free")
@@ -160,7 +139,6 @@ class AgentRuntimeContext:
 class AgentHostContext:
     mode: HostProfile
     workspace_root: str
-    environment: EnvironmentSummary
 
     def __post_init__(self) -> None:
         _validate_utf8(self.workspace_root, label="workspace root")
@@ -168,13 +146,9 @@ class AgentHostContext:
             raise RuntimeConfigurationError("workspace root must be non-empty and NUL-free")
 
     def diagnostics(self) -> dict[str, object]:
-        environment: dict[str, object] = {"kind": self.environment.kind.value}
-        if self.environment.name is not None:
-            environment["name"] = self.environment.name
         return {
             "mode": self.mode.value,
             "workspace_root": self.workspace_root,
-            "environment": environment,
         }
 
 
@@ -216,11 +190,7 @@ class RuntimeComposition:
 
         explicit = overrides or ShellOpenOverrides()
         cwd = self.host.default_cwd if explicit.cwd is None else explicit.cwd
-        executable = (
-            explicit.executable
-            if explicit.executable is not None
-            else self.host.default_shell or self.runtime.dialect.default_executable
-        )
+        executable = self.host.default_shell or self.runtime.dialect.default_executable
         startup_command = (
             self.host.startup_command
             if explicit.startup_command is STARTUP_COMMAND_UNSET
@@ -260,14 +230,22 @@ class RuntimeComposition:
             host=AgentHostContext(
                 mode=self.host.host_profile,
                 workspace_root=self.host.workspace_root,
-                environment=self.host.environment_summary,
             ),
         )
 
-    def instructions(self) -> str:
+    def instructions(self, *, shell_version: str | None = None) -> str:
         dialect = self.runtime.dialect.dialect_name.value
+        backend = "Windows ConPTY" if self.host.platform is NativePlatform.WINDOWS else "POSIX PTY"
+        version = "" if shell_version is None else f" Shell version: {shell_version}."
+        windows_bash = (
+            " Bash/zsh commands use MSYS path semantics, while MCP cwd fields remain Windows paths."
+            if self.host.platform is NativePlatform.WINDOWS
+            and self.runtime.dialect.dialect_name in {DialectName.BASH, DialectName.ZSH}
+            else ""
+        )
         return (
             f"Commands use the {dialect} dialect on {self.host.platform.value}. "
+            f"The terminal backend is {backend}.{version}{windows_bash} "
             f"The default working directory is {self.host.default_cwd}. "
             "The workspace root is context, not a filesystem sandbox boundary. "
             "Use shell_list for authoritative runtime and host metadata."
@@ -294,22 +272,12 @@ class RuntimeBuilders:
 
 
 def resolve_runtime(selection: RuntimeSelection, *, operating_system: str) -> RuntimeName:
-    """Resolve once using only the OS; host/IDE/env/command are intentionally absent."""
+    """Resolve the native terminal backend; dialect selection is independent."""
 
+    del selection
     platform = _runtime_platform(operating_system)
-    if selection is RuntimeSelection.AUTO:
-        return (
-            RuntimeName.WINDOWS_PWSH
-            if platform is RuntimePlatform.WINDOWS
-            else RuntimeName.POSIX_BASH
-        )
-    selected = RuntimeName(selection.value)
-    expected = (
-        RuntimePlatform.WINDOWS if selected is RuntimeName.WINDOWS_PWSH else RuntimePlatform.POSIX
-    )
-    if platform is not expected:
-        raise RuntimeConfigurationError(f"{selected.value} is incompatible with {operating_system}")
-    return selected
+    windows = platform is RuntimePlatform.WINDOWS
+    return RuntimeName.WINDOWS_PWSH if windows else RuntimeName.POSIX_BASH
 
 
 def create_host_config(
@@ -323,11 +291,13 @@ def create_host_config(
     default_cwd: str | None = None,
     default_shell: str | None = None,
     startup_command: str | None = None,
-    environment_summary: EnvironmentSummary | None = None,
+    resolved_runtime: RuntimeName | None = None,
     directory_exists: Callable[[str], bool],
 ) -> HostConfig:
     platform = _native_platform(operating_system)
-    runtime = resolve_runtime(runtime_selection, operating_system=operating_system)
+    runtime = resolved_runtime or resolve_runtime(
+        runtime_selection, operating_system=operating_system
+    )
     if host_profile is HostProfile.IDE and workspace_root is None:
         raise RuntimeConfigurationError("IDE hosts must provide workspace_root")
     workspace = process_cwd if workspace_root is None else workspace_root
@@ -348,7 +318,6 @@ def create_host_config(
         default_shell=default_shell,
         startup_command=startup_command,
         environment=inherited_environment,
-        environment_summary=environment_summary or EnvironmentSummary(),
     )
 
 

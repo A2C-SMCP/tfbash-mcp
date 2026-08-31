@@ -33,8 +33,10 @@ jobs:
         include:
           - platform: Linux
             runner: ubuntu-24.04
+            python: "3.12.10"
           - platform: macOS
             runner: macos-15
+            python: "3.11.9"
 
     steps:
       - name: Checkout repository
@@ -45,21 +47,35 @@ jobs:
         with:
           enable-cache: true
           version: "0.8.17"
-          python-version: "3.12.10"
+          python-version: ${{ matrix.python }}
 
       - name: Install locked dependencies
-        run: uv sync --locked --all-groups --python 3.12.10
+        run: uv sync --locked --all-groups --python ${{ matrix.python }}
+
+      - name: Require every supported POSIX shell
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install --yes zsh
+          fi
+          for executable in bash zsh pwsh; do
+            command -v "$executable"
+          done
+          echo "PHASE0_POSIX_PWSH=$(command -v pwsh)" >> "$GITHUB_ENV"
 
       - name: Run shared and native POSIX integration contracts
         run: |
-          uv run --python 3.12.10 pytest \
+          uv run --python ${{ matrix.python }} pytest \
             tests/test_protocol.py \
             tests/test_runtime_config.py \
             tests/test_package.py \
             tests/test_mcp_adapter.py \
             tests/test_server_config.py \
             tests/test_runtime_contracts.py \
+            tests/test_shell_resolver.py \
             tests/test_bash_dialect.py \
+            tests/test_zsh_dialect.py \
             tests/test_posix_pty.py \
             tests/test_posix_process.py::test_domain_control_targets_real_bash_foreground_group_and_recovers \
             tests/test_posix_process.py::test_control_reaches_pipeline_after_process_group_leader_exits \
@@ -99,6 +115,22 @@ jobs:
           }
           Expand-Archive -Path $archive -DestinationPath $install
           "PHASE0_PWSH=$(Join-Path $install 'pwsh.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHASE0_WINDOWS_POWERSHELL=$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHASE0_GIT_BASH=$env:ProgramFiles\Git\bin\bash.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $install | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Require every supported Windows shell
+        shell: pwsh
+        run: |
+          foreach ($executable in @(
+            $env:PHASE0_PWSH,
+            $env:PHASE0_WINDOWS_POWERSHELL,
+            $env:PHASE0_GIT_BASH
+          )) {
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+              throw "Required Windows shell is unavailable: $executable"
+            }
+          }
 
       - name: Install locked dependencies
         run: uv sync --locked --all-groups --python 3.12.10
@@ -113,6 +145,7 @@ jobs:
             tests/test_mcp_adapter.py `
             tests/test_server_config.py `
             tests/test_runtime_contracts.py `
+            tests/test_shell_resolver.py `
             tests/test_powershell_dialect.py `
             tests/test_windows_bootstrap.py `
             tests/test_windows_conpty.py `

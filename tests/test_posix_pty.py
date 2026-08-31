@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import os
+import platform
 import select
 import signal
 import sys
@@ -158,7 +159,233 @@ def _synthetic_session(
     session._closed = False
     session._close_lock = Lock()
     session._read_guard = Lock()
+    session._write_lock = Lock()
+    session._terminal_query_tail = b""
+    session._terminal_responses = bytearray()
     return session
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX spawn test")
+def test_native_spawn_uses_isolated_terminal_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import termios
+
+    closed: list[int] = []
+    launches: list[tuple[str, tuple[str, ...], dict[str, str], object, bool]] = []
+    configured_attributes: list[list[Any]] = []
+    control_characters = [b"\x00"] * (max(termios.VMIN, termios.VTIME) + 1)
+    attributes = [
+        0,
+        0,
+        0,
+        termios.ECHO | termios.ECHONL | termios.ICANON,
+        0,
+        0,
+        control_characters,
+    ]
+    monkeypatch.setattr(os, "openpty", lambda: (101, 102))
+    monkeypatch.setattr(termios, "tcgetattr", lambda _fd: attributes.copy())
+
+    def record_terminal_attributes(
+        _file_descriptor: int,
+        _when: int,
+        configured: list[Any],
+    ) -> None:
+        configured_attributes.append(configured)
+
+    monkeypatch.setattr(termios, "tcsetattr", record_terminal_attributes)
+    monkeypatch.setattr(os, "ttyname", lambda _fd: "/dev/ttys999")
+    monkeypatch.setattr(os, "close", closed.append)
+
+    def record_spawn(
+        executable: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        *,
+        file_actions: object,
+        setsid: bool,
+    ) -> int:
+        launches.append((executable, arguments, environment, file_actions, setsid))
+        return 4321
+
+    monkeypatch.setattr(os, "posix_spawn", record_spawn)
+    request = SpawnRequest(
+        executable="/bin/bash",
+        arguments=("--noprofile",),
+        cwd="/working directory",
+        environment={"PS1": "prompt", "SAFE": "value"},
+    )
+
+    assert PexpectPosixPtyTransport._posix_spawn(request) == (101, 4321)
+
+    assert len(launches) == 1
+    launcher, arguments, environment, file_actions, setsid = launches[0]
+    assert launcher == sys.executable
+    assert arguments == (
+        sys.executable,
+        "-I",
+        "-m",
+        "tfbash_mcp.runtime.posix_spawn_bootstrap",
+        "/working directory",
+        "/bin/bash",
+        "--noprofile",
+    )
+    assert environment == request.environment
+    assert file_actions == (
+        (os.POSIX_SPAWN_OPEN, 0, "/dev/ttys999", os.O_RDWR, 0),
+        (os.POSIX_SPAWN_DUP2, 0, 1),
+        (os.POSIX_SPAWN_DUP2, 0, 2),
+        (os.POSIX_SPAWN_CLOSE, 101),
+        (os.POSIX_SPAWN_CLOSE, 102),
+    )
+    assert setsid
+    assert closed == [102]
+    assert len(configured_attributes) == 1
+    configured = configured_attributes[0]
+    assert not configured[3] & (termios.ECHO | termios.ECHONL | termios.ICANON)
+    assert configured[6][termios.VMIN] == 1
+    assert configured[6][termios.VTIME] == 0
+
+
+def test_terminal_queries_split_across_reads_receive_priority_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = PexpectPosixPtyTransport()
+    session = _synthetic_session(transport)
+    chunks = iter((b"prefix\x1b[", b"5n-middle\x1b[6", b"n-suffix"))
+    writes: list[bytes] = []
+
+    monkeypatch.setattr(os, "read", lambda _fd, _size: next(chunks))
+
+    def record_write(_fd: int, data: bytes | memoryview) -> int:
+        payload = bytes(data)
+        writes.append(payload)
+        return len(payload)
+
+    monkeypatch.setattr(os, "write", record_write)
+
+    assert transport.read(session, 4096).data == b"prefix\x1b["
+    assert transport.read(session, 4096).data == b"5n-middle\x1b[6"
+    assert transport.read(session, 4096).data == b"n-suffix"
+    assert writes == [b"\x1b[0n", b"\x1b[1;1R"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode test")
+def test_native_write_restores_streaming_input_after_shell_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import termios
+
+    transport = PexpectPosixPtyTransport(use_posix_spawn=True)
+    session = _synthetic_session(transport)
+    control_characters = [b"\x00"] * (max(termios.VMIN, termios.VTIME) + 1)
+    configured_attributes: list[list[Any]] = []
+    monkeypatch.setattr(
+        termios,
+        "tcgetattr",
+        lambda _fd: [
+            0,
+            0,
+            0,
+            termios.ECHO | termios.ECHONL | termios.ICANON,
+            0,
+            0,
+            control_characters,
+        ],
+    )
+    monkeypatch.setattr(
+        termios,
+        "tcsetattr",
+        lambda _fd, _when, attributes: configured_attributes.append(attributes),
+    )
+    monkeypatch.setattr(os, "write", lambda _fd, data: len(data))
+
+    result = transport.write(session, memoryview(b"bootstrap"))
+
+    assert result.bytes_written == len(b"bootstrap")
+    assert len(configured_attributes) == 1
+    configured = configured_attributes[0]
+    assert not configured[3] & (termios.ECHO | termios.ECHONL | termios.ICANON)
+    assert configured[6][termios.VMIN] == 1
+    assert configured[6][termios.VTIME] == 0
+
+
+@pytest.mark.parametrize(
+    ("error_number", "expected"),
+    [
+        (errno.EBADF, TransportClosed),
+        (errno.EINVAL, TransportError),
+        (None, TransportError),
+    ],
+)
+@pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode test")
+def test_native_write_maps_terminal_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int | None,
+    expected: type[Exception],
+) -> None:
+    import termios
+
+    transport = PexpectPosixPtyTransport(use_posix_spawn=True)
+    session = _synthetic_session(transport)
+    failure: Exception
+    if error_number is None:
+        failure = ValueError("invalid file descriptor")
+    else:
+        failure = termios.error(error_number, "terminal configuration failed")
+
+    def fail_configuration(_file_descriptor: int) -> list[Any]:
+        raise failure
+
+    monkeypatch.setattr(termios, "tcgetattr", fail_configuration)
+
+    with pytest.raises(expected):
+        transport.write(session, memoryview(b"bootstrap"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode test")
+def test_streaming_input_configuration_on_master_is_visible_from_slave() -> None:
+    import termios
+
+    master_fd, slave_fd = os.openpty()
+    try:
+        PexpectPosixPtyTransport._configure_streaming_input(master_fd)
+        attributes = termios.tcgetattr(slave_fd)
+        assert not attributes[3] & (termios.ECHO | termios.ECHONL | termios.ICANON)
+        assert attributes[6][termios.VMIN] == 1
+        assert attributes[6][termios.VTIME] == 0
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
+def test_terminal_response_precedes_user_input_after_backpressure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = PexpectPosixPtyTransport()
+    session = _synthetic_session(transport)
+    writes: list[bytes] = []
+    response_blocked = True
+
+    monkeypatch.setattr(os, "read", lambda _fd, _size: b"\x1b[6n")
+
+    def record_write(_fd: int, data: bytes | memoryview) -> int:
+        nonlocal response_blocked
+        payload = bytes(data)
+        if response_blocked:
+            response_blocked = False
+            raise BlockingIOError(errno.EAGAIN, "injected terminal response backpressure")
+        writes.append(payload)
+        return len(payload)
+
+    monkeypatch.setattr(os, "write", record_write)
+
+    assert transport.read(session, 4096).data == b"\x1b[6n"
+    written = transport.write(session, memoryview(b"user-input"))
+    assert written.bytes_written == len(b"user-input")
+    assert not written.would_block
+    assert writes == [b"\x1b[1;1R", b"user-input"]
 
 
 def _write_all(
@@ -201,13 +428,26 @@ def _drain(
     raise AssertionError("PTY did not reach EOF before the deadline")
 
 
+@pytest.mark.parametrize(
+    "use_posix_spawn",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(platform.system() != "Darwin", reason="macOS spawn path"),
+        ),
+    ],
+)
 @pytest.mark.skipif(os.name != "posix", reason="POSIX PTY test")
-def test_transport_drives_bash_dialect_without_expect(tmp_path: Path) -> None:
+def test_transport_drives_bash_dialect_without_expect(
+    tmp_path: Path,
+    use_posix_spawn: bool,
+) -> None:
     plan = BashDialect(token_factory=iter(("A" * 32, "B" * 32)).__next__).prepare_session(
         ShellStartRequest("/bin/bash", str(tmp_path), dict(os.environ), None)
     )
     protocol = cast(BashProtocol, plan.protocol)
-    transport = PexpectPosixPtyTransport()
+    transport = PexpectPosixPtyTransport(use_posix_spawn=use_posix_spawn)
     owner = _Ownership("bash")
     session = cast(PexpectPosixSession, transport.spawn(plan.launch.spawn, owner))
     try:

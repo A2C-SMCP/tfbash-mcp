@@ -9,8 +9,6 @@ from tfbash_mcp.runtime.config import (
     AgentContext,
     AgentHostContext,
     AgentRuntimeContext,
-    EnvironmentKind,
-    EnvironmentSummary,
     HostConfig,
     HostProfile,
     NativePlatform,
@@ -60,11 +58,14 @@ from tfbash_mcp.runtime.errors import (
 from tfbash_mcp.runtime.powershell import PowerShellDialect, PowerShellProtocol
 from tfbash_mcp.runtime.profile import (
     ManagedRuntimeSession,
+    NativeRuntimeProfile,
     PosixBashProfile,
     RuntimePlatform,
     RuntimeProfile,
     WindowsPwshProfile,
 )
+from tfbash_mcp.runtime.resolver import ShellResolution, resolve_shell
+from tfbash_mcp.runtime.zsh import ZshDialect
 
 if TYPE_CHECKING:
     from tfbash_mcp.runtime.posix_process import (
@@ -143,12 +144,11 @@ __all__ = [
     "DialectProtocol",
     "DialectProtocolError",
     "DialectSessionPlan",
-    "EnvironmentKind",
-    "EnvironmentSummary",
     "HostConfig",
     "HostProfile",
     "ManagedRuntimeSession",
     "NativePlatform",
+    "NativeRuntimeProfile",
     "PexpectPosixPtyTransport",
     "PexpectPosixSession",
     "PosixBashProfile",
@@ -173,6 +173,7 @@ __all__ = [
     "RuntimeSession",
     "ShellDialect",
     "ShellOpenOverrides",
+    "ShellResolution",
     "ShellStartRequest",
     "SpawnRequest",
     "TransportClosed",
@@ -188,7 +189,9 @@ __all__ = [
     "WindowsProcessSupervisor",
     "WindowsPwshProfile",
     "WindowsSpawnOwnership",
+    "ZshDialect",
     "compose_runtime",
     "create_host_config",
     "resolve_runtime",
+    "resolve_shell",
 ]

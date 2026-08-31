@@ -27,6 +27,7 @@ from tfbash_mcp.runtime.errors import (
     CleanupTimeout,
     ProcessControlError,
     RuntimeBoundaryError,
+    StartupHandshakeError,
     TransportError,
 )
 from tfbash_mcp.runtime.profile import ManagedRuntimeSession, RuntimeProfile
@@ -901,7 +902,8 @@ class ShellWorker:
                     return event.cwd
             if eof:
                 break
-        raise RuntimeError("shell did not become ready before startup deadline")
+        phase = "startup-record" if bootstrap_sent else "initial-prompt"
+        raise StartupHandshakeError(phase)
 
     def _read_events(
         self,

@@ -6,8 +6,10 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from datetime import datetime, timezone
+from typing import Any, Protocol, cast
 
+import anyio
 from mcp import types
 from pydantic import BaseModel
 
@@ -20,6 +22,7 @@ from tfbash_mcp.domain import (
     ShellBusy,
     ShellClosing,
     ShellNotFound,
+    ShellOverviewSnapshot,
     ShellSnapshot,
     ShellUnavailable,
 )
@@ -42,6 +45,7 @@ from tfbash_mcp.protocol import (
     ToolName,
     make_error,
     model_to_wire,
+    tool_contract_schemas,
     validate_tool_input,
     validate_tool_output,
 )
@@ -58,6 +62,19 @@ from tfbash_mcp.runtime import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+SHELL_OVERVIEW_URI = "window://io.github.a2c-smcp.tfbash/shell-overview"
+SHELL_OVERVIEW_OUTPUT_CHARACTERS = 500
+
+TOOL_TAGS: dict[ToolName, tuple[str, ...]] = {
+    ToolName.SHELL_OPEN: ("BuildIn", "Create"),
+    ToolName.SHELL_EXEC: ("BuildIn", "Create", "Read", "Update", "Delete"),
+    ToolName.SHELL_READ: ("BuildIn", "Read"),
+    ToolName.SHELL_WRITE: ("BuildIn", "Create", "Read", "Update", "Delete"),
+    ToolName.SHELL_SIGNAL: ("BuildIn", "Update"),
+    ToolName.SHELL_LIST: ("BuildIn", "Read"),
+    ToolName.SHELL_CLOSE: ("BuildIn", "Delete"),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +95,25 @@ class ToolConcurrencyLimits:
             <= 0
         ):
             raise ValueError("tool thread limits must be positive")
+
+
+class ToolConcurrencyBudget:
+    """Thread budget shareable by runtimes on one AnyIO backend/event loop."""
+
+    def __init__(self, limits: ToolConcurrencyLimits) -> None:
+        self._wait = anyio.CapacityLimiter(limits.wait_threads)
+        self._control = anyio.CapacityLimiter(limits.control_threads)
+        self._close = anyio.CapacityLimiter(limits.close_threads)
+        self._metadata = anyio.CapacityLimiter(limits.metadata_threads)
+
+    def limiter_for(self, tool: ToolName) -> anyio.CapacityLimiter:
+        if tool in {ToolName.SHELL_OPEN, ToolName.SHELL_EXEC, ToolName.SHELL_READ}:
+            return self._wait
+        if tool in {ToolName.SHELL_WRITE, ToolName.SHELL_SIGNAL}:
+            return self._control
+        if tool is ToolName.SHELL_CLOSE:
+            return self._close
+        return self._metadata
 
 
 class ShellManager(Protocol):
@@ -113,6 +149,14 @@ class ShellManager(Protocol):
 
     def snapshots(self) -> tuple[ShellSnapshot, ...]: ...
 
+    def overview_snapshots(
+        self,
+        *,
+        max_output_characters: int,
+    ) -> tuple[ShellOverviewSnapshot, ...]: ...
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]: ...
+
     def shutdown(self) -> None: ...
 
 
@@ -142,7 +186,9 @@ class ShellToolService:
 
     @property
     def instructions(self) -> str:
-        return self._composition.instructions()
+        return self._composition.instructions(
+            shell_version=self._agent_context.runtime.shell_version,
+        )
 
     @property
     def tool_descriptions(self) -> dict[str, str]:
@@ -187,6 +233,15 @@ class ShellToolService:
     def shutdown(self) -> None:
         self._manager.shutdown()
 
+    def shell_overview_markdown(self) -> str:
+        snapshots = self._manager.overview_snapshots(
+            max_output_characters=SHELL_OVERVIEW_OUTPUT_CHARACTERS,
+        )
+        return _overview_markdown(self._agent_context.diagnostics(), snapshots)
+
+    def subscribe_overview_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return self._manager.subscribe_overview_changes(listener)
+
     def _dispatch(
         self,
         tool: ToolName,
@@ -204,7 +259,6 @@ class ShellToolService:
                 ShellOpenOverrides(
                     cwd=open_request.cwd,
                     environment=open_request.env,
-                    executable=open_request.shell,
                     startup_command=startup_command,
                 ),
                 directory_exists=self._directory_exists,
@@ -330,6 +384,62 @@ class ShellToolService:
         return None
 
 
+def tool_definitions(service: ShellToolService) -> tuple[types.Tool, ...]:
+    """Build fresh public MCP tool definitions from the shared V1 contracts."""
+
+    contracts = tool_contract_schemas(service.protocol_config)
+    _redact_sensitive_schema_defaults(contracts)
+    descriptions = service.tool_descriptions
+    return tuple(
+        types.Tool(
+            name=tool.value,
+            description=descriptions[tool.value],
+            inputSchema=cast(dict[str, Any], contracts[tool.value]["inputSchema"]),
+            outputSchema=cast(dict[str, Any], contracts[tool.value]["outputSchema"]),
+            _meta={
+                "tfbash-mcp/errorSchema": cast(
+                    dict[str, Any], contracts[tool.value]["errorSchema"]
+                ),
+                "a2c_tool_meta": {"tags": list(TOOL_TAGS[tool])},
+            },
+        )
+        for tool in ToolName
+    )
+
+
+async def call_tool_async(
+    service: ShellToolService,
+    name: str,
+    arguments: dict[str, object],
+    budget: ToolConcurrencyBudget,
+) -> types.CallToolResult:
+    """Run one synchronous Domain call without blocking the host event loop."""
+
+    try:
+        tool = ToolName(name)
+    except ValueError:
+        tool = ToolName.SHELL_LIST
+    return await anyio.to_thread.run_sync(
+        service.call,
+        name,
+        arguments,
+        abandon_on_cancel=True,
+        limiter=budget.limiter_for(tool),
+    )
+
+
+def _redact_sensitive_schema_defaults(
+    contracts: dict[str, dict[str, dict[str, object]]],
+) -> None:
+    open_input = contracts[ToolName.SHELL_OPEN.value]["inputSchema"]
+    properties = open_input.get("properties")
+    if not isinstance(properties, dict):
+        raise RuntimeConfigurationError("shell_open schema has no properties")
+    startup_schema = properties.get("startup_command")
+    if isinstance(startup_schema, dict):
+        startup_schema.pop("default", None)
+
+
 def _execution_to_wire(snapshot: DomainExecutionSnapshot) -> dict[str, object]:
     result: dict[str, object] = {
         "shell_id": snapshot.shell_id,
@@ -391,3 +501,131 @@ def _plain_error_result(message: str) -> types.CallToolResult:
 
 def _json_text(value: dict[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _overview_markdown(
+    context: dict[str, object],
+    snapshots: tuple[ShellOverviewSnapshot, ...],
+) -> str:
+    runtime = cast(dict[str, object], context["runtime"])
+    host = cast(dict[str, object], context["host"])
+    lines = [
+        "# Shell Overview",
+        "",
+        f"- Platform: {_inline(runtime['platform'])}",
+        f"- Dialect: {_inline(runtime['dialect'])}",
+        f"- Workspace: {_inline(host['workspace_root'])}",
+        f"- Shells: {len(snapshots)}",
+        "",
+    ]
+    if not snapshots:
+        lines.append("No active Shells.")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "| Shell ID | Status | CWD | Created | Execution ID | "
+            "Execution status | Exit code | Duration |",
+            "|---|---|---|---|---|---|---:|---:|",
+        ]
+    )
+    for snapshot in snapshots:
+        shell = snapshot.shell
+        execution = snapshot.execution
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _table_inline(shell.shell_id),
+                    shell.status.value,
+                    _table_inline(shell.last_known_cwd),
+                    _format_created_at(shell.created_at_ms),
+                    _table_inline(execution.exec_id if execution is not None else None),
+                    execution.status.value if execution is not None else "—",
+                    (
+                        str(execution.exit_code)
+                        if execution and execution.exit_code is not None
+                        else "—"
+                    ),
+                    (
+                        f"{execution.duration_ms} ms"
+                        if execution and execution.duration_ms is not None
+                        else "—"
+                    ),
+                )
+            )
+            + " |"
+        )
+
+    for snapshot in snapshots:
+        execution = snapshot.execution
+        lines.extend(["", f"## {_inline(snapshot.shell.shell_id)} — recent output", ""])
+        if execution is None:
+            lines.append("No retained execution.")
+            continue
+        if execution.output_truncated:
+            lines.extend(["_Earlier output was truncated._", ""])
+        if execution.output:
+            lines.append(_code_block(execution.output))
+        else:
+            lines.append("No output captured.")
+    return "\n".join(lines)
+
+
+def _inline(value: object | None) -> str:
+    if value is None:
+        return "—"
+    return _code_span(_visible_inline_text(str(value)))
+
+
+def _table_inline(value: object | None) -> str:
+    if value is None:
+        return "—"
+    text = _visible_inline_text(str(value)).replace("|", r"\|")
+    return _code_span(text)
+
+
+def _code_span(text: str) -> str:
+    delimiter = "`" * (_longest_run(text, "`") + 1)
+    if len(delimiter) == 1:
+        return f"{delimiter}{text}{delimiter}"
+    return f"{delimiter} {text} {delimiter}"
+
+
+def _visible_inline_text(value: str) -> str:
+    rendered: list[str] = []
+    for character in value:
+        codepoint = ord(character)
+        if character == "\r":
+            rendered.append(r"\r")
+        elif character == "\n":
+            rendered.append(r"\n")
+        elif character == "\t":
+            rendered.append(r"\t")
+        elif codepoint < 32 or codepoint == 127:
+            rendered.append(f"\\u{codepoint:04x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
+def _code_block(value: str) -> str:
+    fence = "`" * max(3, _longest_run(value, "`") + 1)
+    trailing_newline = "" if value.endswith("\n") else "\n"
+    return f"{fence}text\n{value}{trailing_newline}{fence}"
+
+
+def _longest_run(value: str, character: str) -> int:
+    longest = current = 0
+    for item in value:
+        if item == character:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _format_created_at(milliseconds: int) -> str:
+    created = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+    return created.isoformat(timespec="milliseconds").replace("+00:00", "Z")

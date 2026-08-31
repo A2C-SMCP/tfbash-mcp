@@ -14,7 +14,6 @@ from tfbash_mcp.protocol import (
     RETRYABLE_BY_CODE,
     CancelledExecutionSnapshot,
     DialectName,
-    EnvironmentSummary,
     ErrorCode,
     ExitedExecutionSnapshot,
     PlatformName,
@@ -266,11 +265,18 @@ def test_real_json_schema_binds_output_to_runtime_profile() -> None:
         "host": {
             "mode": "standalone",
             "workspace_root": r"C:\work\project",
-            "environment": {"kind": "none"},
         },
         "shells": [],
     }
     _validate_schema(list_schema, valid_list)
+    with pytest.raises(JsonSchemaValidationError):
+        _validate_schema(
+            list_schema,
+            {
+                **valid_list,
+                "host": {**valid_list["host"], "environment": {"kind": "python-venv"}},
+            },
+        )
     with pytest.raises(JsonSchemaValidationError):
         _validate_schema(
             list_schema,
@@ -601,7 +607,7 @@ def test_exit_code_range_depends_on_runtime_platform() -> None:
         ),
         ExitedExecutionSnapshot,
     )
-    with pytest.raises(ValidationError, match="POSIX exit_code"):
+    with pytest.raises(ValidationError, match="selected runtime range"):
         validate_tool_output(
             ToolName.SHELL_EXEC,
             _terminal_payload(exit_code=256),
@@ -650,7 +656,6 @@ def test_shell_open_and_list_results_expose_only_runtime_context() -> None:
             "host": {
                 "mode": "ide",
                 "workspace_root": "/workspace",
-                "environment": {"kind": "python-venv", "name": ".venv"},
             },
             "shells": [],
         },
@@ -658,7 +663,7 @@ def test_shell_open_and_list_results_expose_only_runtime_context() -> None:
     )
     assert isinstance(list_result, ShellListResult)
     serialized = list_result.model_dump(mode="json", exclude_unset=True)
-    assert serialized["host"]["environment"] == {"kind": "python-venv", "name": ".venv"}
+    assert serialized["host"] == {"mode": "ide", "workspace_root": "/workspace"}
 
     with pytest.raises(ValidationError):
         validate_tool_output(
@@ -734,15 +739,6 @@ def test_shell_list_rejects_inconsistent_active_execution(
             },
             context=POSIX_CONFIG,
         )
-
-
-def test_environment_display_name_is_optional_and_omitted_not_null() -> None:
-    summary = EnvironmentSummary.model_validate({"kind": "none"})
-    assert summary.model_dump(mode="json") == {"kind": "none"}
-    assert json.loads(summary.model_dump_json()) == {"kind": "none"}
-    assert model_to_wire(summary) == {"kind": "none"}
-    with pytest.raises(ValidationError):
-        EnvironmentSummary.model_validate({"kind": "none", "name": None})
 
 
 @pytest.mark.parametrize("code", list(ErrorCode))

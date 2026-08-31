@@ -62,6 +62,27 @@ def test_read_limit_ends_before_partial_code_point() -> None:
     assert second.at_end is True
 
 
+def test_character_tail_is_unicode_safe_and_reports_omitted_output() -> None:
+    buffer = Utf8OutputBuffer(64)
+    buffer.append("prefix-a界🙂z".encode())
+
+    tail = buffer.tail(4)
+
+    assert tail.output == "a界🙂z"[-4:]
+    assert tail.truncated is True
+
+
+def test_character_tail_reports_complete_short_output() -> None:
+    buffer = Utf8OutputBuffer(64)
+    buffer.append("你好".encode())
+
+    assert buffer.tail(500).output == "你好"
+    assert buffer.tail(500).truncated is False
+
+    with pytest.raises(ValueError, match="positive"):
+        buffer.tail(0)
+
+
 @pytest.mark.parametrize("capacity", [-1, 0, 3])
 def test_buffer_capacity_must_hold_one_utf8_code_point(capacity: int) -> None:
     with pytest.raises(ValueError):

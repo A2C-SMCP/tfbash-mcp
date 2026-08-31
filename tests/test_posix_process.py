@@ -449,6 +449,27 @@ def test_cleanup_orders_cont_term_then_cont_kill(
     ]
 
 
+def test_cleanup_retries_transient_nonblocking_leader_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = PosixProcessSupervisor(ownership_id_factory=lambda: "reap-race")
+    ownership = cast(PosixProcessOwnership, supervisor.prepare())
+    ownership._process_id = 123
+    ownership._session_id = 123
+    ownership._shell_process_group_id = 123
+    attempts = iter([False, True])
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(supervisor, "_snapshot_before_deadline", lambda *_args: [])
+    monkeypatch.setattr(supervisor, "_finalize_leader", lambda _ownership: next(attempts))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    result = supervisor.cleanup(ownership, deadline_ms=1_000)
+
+    assert result.reaped
+    assert sleeps == [0.01]
+
+
 def test_finalized_ownership_never_reuses_old_native_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

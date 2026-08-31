@@ -20,6 +20,14 @@ class OutputSlice:
     at_end: bool
 
 
+@dataclass(frozen=True, slots=True)
+class OutputTail:
+    """The most recent Unicode characters from normalized output."""
+
+    output: str
+    truncated: bool
+
+
 class Utf8OutputBuffer:
     """A byte-bounded UTF-8 buffer that never cuts a code point."""
 
@@ -96,6 +104,25 @@ class Utf8OutputBuffer:
                 next_cursor=next_cursor,
                 truncated_before_cursor=truncated,
                 at_end=next_cursor == self._write_cursor,
+            )
+
+    def tail(self, max_characters: int) -> OutputTail:
+        """Return at most the final ``max_characters`` Unicode code points."""
+
+        if max_characters < 1:
+            raise ValueError("max_characters must be positive")
+        with self._lock:
+            # A UTF-8 code point occupies at most four bytes. Decoding this bounded
+            # suffix recovers the requested character tail without materializing a
+            # potentially multi-megabyte retained buffer.
+            start = max(0, len(self._data) - max_characters * 4)
+            while start < len(self._data) and _is_continuation_byte(self._data[start]):
+                start += 1
+            candidate = bytes(self._data[start:]).decode("utf-8")
+            output = candidate[-max_characters:]
+            return OutputTail(
+                output=output,
+                truncated=self._write_cursor > len(output.encode("utf-8")),
             )
 
     def _append_text(self, text: str) -> int:

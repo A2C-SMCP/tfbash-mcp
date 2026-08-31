@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from threading import Condition, RLock
@@ -16,6 +18,8 @@ from tfbash_mcp.domain.errors import (
     ShellUnavailable,
 )
 from tfbash_mcp.domain.output import Utf8OutputBuffer
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class Clock(Protocol):
@@ -38,6 +42,7 @@ class ChangeSignal:
     def __init__(self) -> None:
         self._condition = Condition()
         self._generation = 0
+        self._listeners: set[Callable[[], None]] = set()
 
     @property
     def generation(self) -> int:
@@ -48,6 +53,26 @@ class ChangeSignal:
         with self._condition:
             self._generation += 1
             self._condition.notify_all()
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                # Observers are advisory; a notification bridge failure must not
+                # prevent the state transition that produced the notification.
+                _LOGGER.exception("domain change listener failed")
+
+    def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Register an advisory listener and return its idempotent unsubscribe."""
+
+        with self._condition:
+            self._listeners.add(listener)
+
+        def unsubscribe() -> None:
+            with self._condition:
+                self._listeners.discard(listener)
+
+        return unsubscribe
 
     def wait_for_change(self, generation: int, timeout_seconds: float | None = None) -> int:
         with self._condition:
@@ -110,6 +135,22 @@ class ShellSnapshot:
     created_at_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionOverviewSnapshot:
+    exec_id: str
+    status: ExecutionState
+    exit_code: int | None
+    duration_ms: int | None
+    output: str
+    output_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ShellOverviewSnapshot:
+    shell: ShellSnapshot
+    execution: ExecutionOverviewSnapshot | None
+
+
 class Execution:
     def __init__(
         self,
@@ -119,6 +160,7 @@ class Execution:
         max_output_bytes: int,
         clock: Clock,
         change_signal: ChangeSignal | None = None,
+        overview_change_signal: ChangeSignal | None = None,
     ) -> None:
         _validate_identifier(shell_id)
         _validate_identifier(exec_id)
@@ -126,6 +168,7 @@ class Execution:
         self.exec_id = exec_id
         self._clock = clock
         self._change_signal = change_signal or ChangeSignal()
+        self._overview_change_signal = overview_change_signal
         self._created_ms = clock.monotonic_ms()
         self._completed_ms: int | None = None
         self._state = ExecutionState.RUNNING
@@ -228,18 +271,43 @@ class Execution:
                 shell_rebuilt=self._shell_rebuilt,
             )
 
+    def overview_snapshot(self, *, max_output_characters: int) -> ExecutionOverviewSnapshot:
+        with self._lock:
+            tail = self._output.tail(max_output_characters)
+            public_state = (
+                ExecutionState.RUNNING if self._state is ExecutionState.FINALIZING else self._state
+            )
+            return ExecutionOverviewSnapshot(
+                exec_id=self.exec_id,
+                status=public_state,
+                exit_code=self._exit_code,
+                duration_ms=self._duration_ms,
+                output=tail.output,
+                output_truncated=tail.truncated,
+            )
+
     def _changed(self) -> None:
         self._change_signal.notify()
+        if self._overview_change_signal is not None:
+            self._overview_change_signal.notify()
 
 
 class CommandShell:
-    def __init__(self, *, shell_id: str, cwd: str, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        shell_id: str,
+        cwd: str,
+        clock: Clock,
+        overview_change_signal: ChangeSignal | None = None,
+    ) -> None:
         _validate_identifier(shell_id)
         self.shell_id = shell_id
         self._state = ShellState.READY
         self._last_known_cwd: str | None = cwd
         self._active_execution: Execution | None = None
         self._created_at_ms = clock.wall_time_ms()
+        self._overview_change_signal = overview_change_signal
         self._lock = RLock()
 
     @property
@@ -259,6 +327,7 @@ class CommandShell:
             if self._state is not ShellState.READY or self._active_execution is not None:
                 raise InvalidTransition("only an idle ready shell can confirm startup")
             self._last_known_cwd = cwd
+            self._changed()
 
     def start_execution(self, execution: Execution) -> None:
         with self._lock:
@@ -275,6 +344,7 @@ class CommandShell:
                 raise InvalidTransition("execution belongs to a different shell")
             self._active_execution = execution
             self._state = ShellState.BUSY
+            self._changed()
 
     def begin_rebuilding(self, exec_id: str) -> None:
         with self._lock:
@@ -282,12 +352,14 @@ class CommandShell:
             if self._state is not ShellState.BUSY:
                 raise InvalidTransition("only a busy shell can begin rebuilding")
             self._state = ShellState.REBUILDING
+            self._changed()
 
     def begin_close(self) -> Execution | None:
         with self._lock:
             if self._state is ShellState.CLOSING:
                 raise ShellClosing(f"shell {self.shell_id} is already closing")
             self._state = ShellState.CLOSING
+            self._changed()
             return self._active_execution
 
     def mark_error(self) -> None:
@@ -299,6 +371,7 @@ class CommandShell:
             if self._active_execution is not None:
                 raise InvalidTransition("an active execution must be sealed as shell_error")
             self._state = ShellState.ERROR
+            self._changed()
 
     def cancel_active(self) -> bool:
         with self._lock:
@@ -312,6 +385,7 @@ class CommandShell:
             )
             if won:
                 self._active_execution = None
+                self._changed()
             return won
 
     def finish_execution(
@@ -345,6 +419,7 @@ class CommandShell:
                 self._state = next_shell_state
             if cwd is not None:
                 self._last_known_cwd = cwd
+            self._changed()
             return True
 
     def snapshot(self) -> ShellSnapshot:
@@ -366,6 +441,10 @@ class CommandShell:
         if self._active_execution is None or self._active_execution.exec_id != exec_id:
             raise ExecutionNotActive(f"execution {exec_id} is not active in {self.shell_id}")
         return self._active_execution
+
+    def _changed(self) -> None:
+        if self._overview_change_signal is not None:
+            self._overview_change_signal.notify()
 
 
 def _validate_identifier(value: str) -> None:
