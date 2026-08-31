@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import os
+import platform
 import select
 import signal
 import sys
@@ -164,6 +165,66 @@ def _synthetic_session(
     return session
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX spawn test")
+def test_native_spawn_uses_isolated_terminal_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import termios
+
+    closed: list[int] = []
+    launches: list[tuple[str, tuple[str, ...], dict[str, str], object, bool]] = []
+    attributes = [0, 0, 0, termios.ECHO | termios.ECHONL, 0, 0, []]
+    monkeypatch.setattr(os, "openpty", lambda: (101, 102))
+    monkeypatch.setattr(termios, "tcgetattr", lambda _fd: attributes.copy())
+    monkeypatch.setattr(termios, "tcsetattr", lambda *_arguments: None)
+    monkeypatch.setattr(os, "ttyname", lambda _fd: "/dev/ttys999")
+    monkeypatch.setattr(os, "close", closed.append)
+
+    def record_spawn(
+        executable: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        *,
+        file_actions: object,
+        setsid: bool,
+    ) -> int:
+        launches.append((executable, arguments, environment, file_actions, setsid))
+        return 4321
+
+    monkeypatch.setattr(os, "posix_spawn", record_spawn)
+    request = SpawnRequest(
+        executable="/bin/bash",
+        arguments=("--noprofile",),
+        cwd="/working directory",
+        environment={"PS1": "prompt", "SAFE": "value"},
+    )
+
+    assert PexpectPosixPtyTransport._posix_spawn(request) == (101, 4321)
+
+    assert len(launches) == 1
+    launcher, arguments, environment, file_actions, setsid = launches[0]
+    assert launcher == sys.executable
+    assert arguments == (
+        sys.executable,
+        "-I",
+        "-m",
+        "tfbash_mcp.runtime.posix_spawn_bootstrap",
+        "/working directory",
+        "/bin/bash",
+        "--noprofile",
+    )
+    assert environment == request.environment
+    assert file_actions == (
+        (os.POSIX_SPAWN_OPEN, 0, "/dev/ttys999", os.O_RDWR, 0),
+        (os.POSIX_SPAWN_DUP2, 0, 1),
+        (os.POSIX_SPAWN_DUP2, 0, 2),
+        (os.POSIX_SPAWN_CLOSE, 101),
+        (os.POSIX_SPAWN_CLOSE, 102),
+    )
+    assert setsid
+    assert closed == [102]
+
+
 def test_terminal_queries_split_across_reads_receive_priority_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -255,13 +316,26 @@ def _drain(
     raise AssertionError("PTY did not reach EOF before the deadline")
 
 
+@pytest.mark.parametrize(
+    "use_posix_spawn",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(platform.system() != "Darwin", reason="macOS spawn path"),
+        ),
+    ],
+)
 @pytest.mark.skipif(os.name != "posix", reason="POSIX PTY test")
-def test_transport_drives_bash_dialect_without_expect(tmp_path: Path) -> None:
+def test_transport_drives_bash_dialect_without_expect(
+    tmp_path: Path,
+    use_posix_spawn: bool,
+) -> None:
     plan = BashDialect(token_factory=iter(("A" * 32, "B" * 32)).__next__).prepare_session(
         ShellStartRequest("/bin/bash", str(tmp_path), dict(os.environ), None)
     )
     protocol = cast(BashProtocol, plan.protocol)
-    transport = PexpectPosixPtyTransport()
+    transport = PexpectPosixPtyTransport(use_posix_spawn=use_posix_spawn)
     owner = _Ownership("bash")
     session = cast(PexpectPosixSession, transport.spawn(plan.launch.spawn, owner))
     try:

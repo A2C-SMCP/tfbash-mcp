@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import os
 import select
+import sys
 import time
 from threading import Lock
 from typing import Any, Protocol, runtime_checkable
@@ -180,16 +181,14 @@ class PexpectPosixPtyTransport:
                 (os.POSIX_SPAWN_CLOSE, master_fd),
                 (os.POSIX_SPAWN_CLOSE, slave_fd),
             )
-            launcher = "/bin/sh"
+            launcher = sys.executable
             arguments = (
                 launcher,
-                "-c",
-                'cd "$1" || exit 126; executable=$2; prompt=$3; shift 3; '
-                'PS1=$prompt; export PS1; exec "$executable" "$@"',
-                "tfbash-posix-spawn",
+                "-I",
+                "-m",
+                "tfbash_mcp.runtime.posix_spawn_bootstrap",
                 request.cwd,
                 request.executable,
-                request.environment.get("PS1", ""),
                 *request.arguments,
             )
             process_id = os.posix_spawn(
