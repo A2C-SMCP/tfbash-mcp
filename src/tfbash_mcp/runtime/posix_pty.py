@@ -171,7 +171,11 @@ class PexpectPosixPtyTransport:
         master_fd, slave_fd = os.openpty()
         try:
             attributes = termios.tcgetattr(slave_fd)
-            attributes[3] &= ~(termios.ECHO | termios.ECHONL)
+            attributes[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON)
+            control_characters = attributes[6].copy()
+            control_characters[termios.VMIN] = 1
+            control_characters[termios.VTIME] = 0
+            attributes[6] = control_characters
             termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
             terminal_path = os.ttyname(slave_fd)
             file_actions = (

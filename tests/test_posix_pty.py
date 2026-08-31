@@ -173,10 +173,28 @@ def test_native_spawn_uses_isolated_terminal_bootstrap(
 
     closed: list[int] = []
     launches: list[tuple[str, tuple[str, ...], dict[str, str], object, bool]] = []
-    attributes = [0, 0, 0, termios.ECHO | termios.ECHONL, 0, 0, []]
+    configured_attributes: list[list[Any]] = []
+    control_characters = [b"\x00"] * (max(termios.VMIN, termios.VTIME) + 1)
+    attributes = [
+        0,
+        0,
+        0,
+        termios.ECHO | termios.ECHONL | termios.ICANON,
+        0,
+        0,
+        control_characters,
+    ]
     monkeypatch.setattr(os, "openpty", lambda: (101, 102))
     monkeypatch.setattr(termios, "tcgetattr", lambda _fd: attributes.copy())
-    monkeypatch.setattr(termios, "tcsetattr", lambda *_arguments: None)
+
+    def record_terminal_attributes(
+        _file_descriptor: int,
+        _when: int,
+        configured: list[Any],
+    ) -> None:
+        configured_attributes.append(configured)
+
+    monkeypatch.setattr(termios, "tcsetattr", record_terminal_attributes)
     monkeypatch.setattr(os, "ttyname", lambda _fd: "/dev/ttys999")
     monkeypatch.setattr(os, "close", closed.append)
 
@@ -223,6 +241,11 @@ def test_native_spawn_uses_isolated_terminal_bootstrap(
     )
     assert setsid
     assert closed == [102]
+    assert len(configured_attributes) == 1
+    configured = configured_attributes[0]
+    assert not configured[3] & (termios.ECHO | termios.ECHONL | termios.ICANON)
+    assert configured[6][termios.VMIN] == 1
+    assert configured[6][termios.VTIME] == 0
 
 
 def test_terminal_queries_split_across_reads_receive_priority_responses(
