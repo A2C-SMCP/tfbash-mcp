@@ -37,6 +37,12 @@ _CURSOR_POSITION_RESPONSE = b"\x1b[1;1R"
 _MAX_TERMINAL_RESPONSE_BYTES = 64
 
 
+class _TerminalConfigurationFailure(Exception):
+    def __init__(self, error_number: int | None) -> None:
+        super().__init__("failed to configure POSIX terminal input")
+        self.error_number = error_number
+
+
 @runtime_checkable
 class PosixSpawnOwnership(ProcessOwnership, Protocol):
     """POSIX-only hook implemented by the process supervisor in #7."""
@@ -163,20 +169,30 @@ class PexpectPosixPtyTransport:
             raise TransportError("failed to spawn POSIX PTY") from error
 
     @staticmethod
-    def _posix_spawn(request: SpawnRequest) -> tuple[int, int]:
-        """Spawn without fork so macOS remains safe after host threads exist."""
-
+    def _configure_streaming_input(file_descriptor: int) -> None:
         import termios
 
-        master_fd, slave_fd = os.openpty()
         try:
-            attributes = termios.tcgetattr(slave_fd)
+            attributes = termios.tcgetattr(file_descriptor)
             attributes[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON)
             control_characters = attributes[6].copy()
             control_characters[termios.VMIN] = 1
             control_characters[termios.VTIME] = 0
             attributes[6] = control_characters
-            termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
+            termios.tcsetattr(file_descriptor, termios.TCSANOW, attributes)
+        except (OSError, termios.error, ValueError) as error:
+            error_number = error.errno if isinstance(error, OSError) else None
+            if error_number is None and error.args and isinstance(error.args[0], int):
+                error_number = error.args[0]
+            raise _TerminalConfigurationFailure(error_number) from error
+
+    @staticmethod
+    def _posix_spawn(request: SpawnRequest) -> tuple[int, int]:
+        """Spawn without fork so macOS remains safe after host threads exist."""
+
+        master_fd, slave_fd = os.openpty()
+        try:
+            PexpectPosixPtyTransport._configure_streaming_input(slave_fd)
             terminal_path = os.ttyname(slave_fd)
             file_actions = (
                 (os.POSIX_SPAWN_OPEN, 0, terminal_path, os.O_RDWR, 0),
@@ -253,23 +269,31 @@ class PexpectPosixPtyTransport:
 
     def write(self, session: RuntimeSession, data: memoryview) -> TransportWrite:
         concrete = self._session(session)
-        self._require_open(concrete)
-        if not data:
-            return TransportWrite(bytes_written=0, would_block=False)
-        with concrete._write_lock:
-            self._flush_terminal_responses(concrete)
-            if concrete._terminal_responses:
-                return TransportWrite(bytes_written=0, would_block=True)
-            try:
-                written = os.write(concrete._file_descriptor, data)
-            except BlockingIOError:
-                return TransportWrite(bytes_written=0, would_block=True)
-            except OSError as error:
-                if error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+        with concrete._close_lock:
+            self._require_open(concrete)
+            if not data:
+                return TransportWrite(bytes_written=0, would_block=False)
+            with concrete._write_lock:
+                if self._use_posix_spawn:
+                    try:
+                        self._configure_streaming_input(concrete._file_descriptor)
+                    except _TerminalConfigurationFailure as error:
+                        if error.error_number in {errno.EBADF, errno.EIO, errno.ENXIO}:
+                            raise TransportClosed("POSIX PTY no longer accepts input") from error
+                        raise TransportError("failed to configure POSIX PTY input") from error
+                self._flush_terminal_responses(concrete)
+                if concrete._terminal_responses:
                     return TransportWrite(bytes_written=0, would_block=True)
-                if error.errno in {errno.EBADF, errno.EIO, errno.ENXIO, errno.EPIPE}:
-                    raise TransportClosed("POSIX PTY no longer accepts input") from error
-                raise TransportError("failed to write POSIX PTY") from error
+                try:
+                    written = os.write(concrete._file_descriptor, data)
+                except BlockingIOError:
+                    return TransportWrite(bytes_written=0, would_block=True)
+                except OSError as error:
+                    if error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                        return TransportWrite(bytes_written=0, would_block=True)
+                    if error.errno in {errno.EBADF, errno.EIO, errno.ENXIO, errno.EPIPE}:
+                        raise TransportClosed("POSIX PTY no longer accepts input") from error
+                    raise TransportError("failed to write POSIX PTY") from error
         return TransportWrite(bytes_written=written, would_block=written < len(data))
 
     def wait(

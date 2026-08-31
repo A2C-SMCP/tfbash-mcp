@@ -271,6 +271,95 @@ def test_terminal_queries_split_across_reads_receive_priority_responses(
     assert writes == [b"\x1b[0n", b"\x1b[1;1R"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode test")
+def test_native_write_restores_streaming_input_after_shell_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import termios
+
+    transport = PexpectPosixPtyTransport(use_posix_spawn=True)
+    session = _synthetic_session(transport)
+    control_characters = [b"\x00"] * (max(termios.VMIN, termios.VTIME) + 1)
+    configured_attributes: list[list[Any]] = []
+    monkeypatch.setattr(
+        termios,
+        "tcgetattr",
+        lambda _fd: [
+            0,
+            0,
+            0,
+            termios.ECHO | termios.ECHONL | termios.ICANON,
+            0,
+            0,
+            control_characters,
+        ],
+    )
+    monkeypatch.setattr(
+        termios,
+        "tcsetattr",
+        lambda _fd, _when, attributes: configured_attributes.append(attributes),
+    )
+    monkeypatch.setattr(os, "write", lambda _fd, data: len(data))
+
+    result = transport.write(session, memoryview(b"bootstrap"))
+
+    assert result.bytes_written == len(b"bootstrap")
+    assert len(configured_attributes) == 1
+    configured = configured_attributes[0]
+    assert not configured[3] & (termios.ECHO | termios.ECHONL | termios.ICANON)
+    assert configured[6][termios.VMIN] == 1
+    assert configured[6][termios.VTIME] == 0
+
+
+@pytest.mark.parametrize(
+    ("error_number", "expected"),
+    [
+        (errno.EBADF, TransportClosed),
+        (errno.EINVAL, TransportError),
+        (None, TransportError),
+    ],
+)
+@pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode test")
+def test_native_write_maps_terminal_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int | None,
+    expected: type[Exception],
+) -> None:
+    import termios
+
+    transport = PexpectPosixPtyTransport(use_posix_spawn=True)
+    session = _synthetic_session(transport)
+    failure: Exception
+    if error_number is None:
+        failure = ValueError("invalid file descriptor")
+    else:
+        failure = termios.error(error_number, "terminal configuration failed")
+
+    def fail_configuration(_file_descriptor: int) -> list[Any]:
+        raise failure
+
+    monkeypatch.setattr(termios, "tcgetattr", fail_configuration)
+
+    with pytest.raises(expected):
+        transport.write(session, memoryview(b"bootstrap"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode test")
+def test_streaming_input_configuration_on_master_is_visible_from_slave() -> None:
+    import termios
+
+    master_fd, slave_fd = os.openpty()
+    try:
+        PexpectPosixPtyTransport._configure_streaming_input(master_fd)
+        attributes = termios.tcgetattr(slave_fd)
+        assert not attributes[3] & (termios.ECHO | termios.ECHONL | termios.ICANON)
+        assert attributes[6][termios.VMIN] == 1
+        assert attributes[6][termios.VTIME] == 0
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
 def test_terminal_response_precedes_user_input_after_backpressure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
