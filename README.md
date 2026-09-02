@@ -166,13 +166,22 @@ config = EmbeddedShellConfig(
 
 async with await EmbeddedShellRuntime.create(config) as runtime:
     tools = runtime.list_tools()
+    resources = runtime.list_resources()
+    overview = runtime.read_resource(resources[0].uri)
+    unsubscribe = runtime.subscribe_resource_updates(on_resource_updated)
     opened = await runtime.call_tool("shell_open")
+    unsubscribe()
 ```
 
 `EmbeddedShellConfig` 会复制环境映射；修改原字典不会改变已经创建的配置。初始化、工具调用
 和关闭均通过异步 API 执行，不阻塞宿主事件循环。每个 `EmbeddedShellRuntime` 拥有独立的
 Shell/Execution Registry；IDE4AI 负责先按项目选择对应实例，再注册 `list_tools()` 返回的
-工具。嵌入 API 本身不创建第二个 MCP Server，也不注册 Shell Overview Resource。需要跨实例
+工具。宿主可将 `list_resources()` 返回的定义、`read_resource()` 的结果及
+`subscribe_resource_updates()` 收到的 URI 桥接到自己的 MCP Server；嵌入 API 本身不创建
+第二个 MCP Server，也不自行注册 Resource。更新回调同步运行在产生 Shell/Execution 变化的
+Domain/worker 线程上，必须快速返回且线程安全；需要执行异步工作时，由宿主投递到自己的事件
+循环。取消订阅函数可幂等调用，`aclose()` 会清理全部遗留订阅；Runtime 进入 closing 后不再
+调用回调，Resource 枚举、读取和新增订阅与工具调用一样会被拒绝。需要跨实例
 限制线程数时，宿主可以把同一个 `ToolConcurrencyBudget` 传给多个 `create()` 调用；这些
 实例必须运行在同一个 AnyIO backend 和宿主事件循环中，budget 不支持跨线程、跨事件循环
 或跨 asyncio/Trio backend 共享。

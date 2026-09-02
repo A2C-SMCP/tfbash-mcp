@@ -25,6 +25,7 @@ from tfbash_mcp.domain import (
 )
 from tfbash_mcp.mcp_adapter import ToolConcurrencyLimits
 from tfbash_mcp.protocol import PlatformName, ProtocolConfig, ToolName, tool_contract_schemas
+from tfbash_mcp.resource_adapter import ShellResourceAdapter
 from tfbash_mcp.runtime import (
     ConPtyTransport,
     DialectName,
@@ -91,7 +92,7 @@ def test_overview_subscription_hub_coalesces_burst_notifications(
         service = FakeOverviewService()
         session = FakeSession()
         hub = _OverviewSubscriptionHub()
-        hub.connect(cast(Any, service))
+        hub.connect(ShellResourceAdapter(cast(Any, service)))
         hub.subscribe(session)
 
         async with anyio.create_task_group() as tasks:

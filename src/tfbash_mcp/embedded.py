@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import platform
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Lock, RLock
 from types import MappingProxyType
 
 import anyio
 from mcp import types
+from pydantic import AnyUrl
 
 from tfbash_mcp.composition import ShellRuntimeConfig, build_shell_service
 from tfbash_mcp.mcp_adapter import (
@@ -20,6 +21,7 @@ from tfbash_mcp.mcp_adapter import (
     call_tool_async,
     tool_definitions,
 )
+from tfbash_mcp.resource_adapter import ShellResourceAdapter
 from tfbash_mcp.runtime import HostProfile, RuntimeSelection
 
 _LOGGER = logging.getLogger(__name__)
@@ -105,8 +107,11 @@ class EmbeddedShellRuntime:
     ) -> None:
         self._service = service
         self._budget = budget
+        self._resources = ShellResourceAdapter(service)
         self._state_lock = Lock()
+        self._resource_notification_lock = RLock()
         self._state = "open"
+        self._resource_unsubscribers: set[Callable[[], None]] = set()
         self._close_lock = anyio.Lock()
         self._close_complete = anyio.Event()
         self._shutdown_limiter = anyio.CapacityLimiter(1)
@@ -162,6 +167,52 @@ class EmbeddedShellRuntime:
         self._require_open()
         return tool_definitions(self._service)
 
+    def list_resources(self) -> tuple[types.Resource, ...]:
+        """Return fresh definitions for Resources owned by this runtime."""
+
+        self._require_open()
+        return self._resources.list_resources()
+
+    def read_resource(self, uri: str | AnyUrl) -> types.ReadResourceResult:
+        """Read a Resource from a consistent snapshot of the current runtime."""
+
+        self._require_open()
+        return self._resources.read_resource(uri)
+
+    def subscribe_resource_updates(
+        self,
+        listener: Callable[[AnyUrl], None],
+    ) -> Callable[[], None]:
+        """Subscribe on producer threads and return an idempotent unsubscribe callback."""
+
+        active = True
+
+        def notify(uri: AnyUrl) -> None:
+            with self._resource_notification_lock:
+                with self._state_lock:
+                    should_notify = active and self._state == "open"
+                if should_notify:
+                    listener(uri)
+
+        unsubscribe_source: Callable[[], None]
+
+        def unsubscribe() -> None:
+            nonlocal active
+            with self._resource_notification_lock:
+                with self._state_lock:
+                    if not active:
+                        return
+                    active = False
+                    self._resource_unsubscribers.discard(unsubscribe)
+                unsubscribe_source()
+
+        with self._resource_notification_lock, self._state_lock:
+            if self._state != "open":
+                raise RuntimeError("embedded shell runtime is closing or closed")
+            unsubscribe_source = self._resources.subscribe_updates(notify)
+            self._resource_unsubscribers.add(unsubscribe)
+        return unsubscribe
+
     async def call_tool(
         self,
         name: str,
@@ -180,19 +231,20 @@ class EmbeddedShellRuntime:
 
         while True:
             async with self._close_lock:
-                with self._state_lock:
-                    if self._state == "closed":
-                        return
-                    if self._state in {"open", "close_failed"}:
-                        self._state = "closing"
-                        owner = True
-                        completion = self._close_complete
-                    else:
-                        owner = False
-                        completion = self._close_complete
-            if not owner:
+                with anyio.CancelScope(shield=True):
+                    claim, completion, resource_unsubscribers = await anyio.to_thread.run_sync(
+                        self._claim_close
+                    )
+            if claim == "closed":
+                return
+            if claim == "wait":
                 await completion.wait()
                 continue
+            for unsubscribe in resource_unsubscribers:
+                try:
+                    unsubscribe()
+                except Exception:
+                    _LOGGER.exception("embedded Resource listener cleanup failed")
             shutdown_error: BaseException | None = None
             with anyio.CancelScope(shield=True):
                 try:
@@ -212,6 +264,22 @@ class EmbeddedShellRuntime:
                 raise shutdown_error
             await anyio.lowlevel.checkpoint_if_cancelled()
             return
+
+    def _claim_close(
+        self,
+    ) -> tuple[str, anyio.Event, tuple[Callable[[], None], ...]]:
+        """Linearize closing after callbacks already in progress have returned."""
+
+        with self._resource_notification_lock, self._state_lock:
+            completion = self._close_complete
+            if self._state == "closed":
+                return "closed", completion, ()
+            if self._state == "closing":
+                return "wait", completion, ()
+            self._state = "closing"
+            resource_unsubscribers = tuple(self._resource_unsubscribers)
+            self._resource_unsubscribers.clear()
+            return "owner", completion, resource_unsubscribers
 
     async def __aenter__(self) -> EmbeddedShellRuntime:
         self._require_open()
