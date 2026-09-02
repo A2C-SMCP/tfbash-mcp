@@ -17,7 +17,6 @@ from mcp import types
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
-from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from tfbash_mcp import __version__
@@ -36,7 +35,6 @@ from tfbash_mcp.composition import (
 )
 from tfbash_mcp.embedded import EmbeddedShellRuntime
 from tfbash_mcp.mcp_adapter import (
-    SHELL_OVERVIEW_URI,
     ShellToolService,
     ToolConcurrencyBudget,
     call_tool_async,
@@ -46,6 +44,7 @@ from tfbash_mcp.mcp_adapter import (
     _redact_sensitive_schema_defaults as _adapter_redact_sensitive_schema_defaults,
 )
 from tfbash_mcp.protocol import ToolName
+from tfbash_mcp.resource_adapter import SHELL_OVERVIEW_URI, ShellResourceAdapter
 from tfbash_mcp.runtime import (
     HostProfile,
     RuntimeConfigurationError,
@@ -105,12 +104,12 @@ class _OverviewSubscriptionHub:
         self._lock = Lock()
         self._unsubscribe_changes: Callable[[], None] | None = None
 
-    def connect(self, service: ShellToolService) -> None:
+    def connect(self, resources: ShellResourceAdapter) -> None:
         if self._unsubscribe_changes is not None:
             raise RuntimeError("overview subscription hub is already connected")
         self._stopped.clear()
         self._changed.clear()
-        self._unsubscribe_changes = service.subscribe_overview_changes(self._changed.set)
+        self._unsubscribe_changes = resources.subscribe_updates(lambda _uri: self._changed.set())
 
     def subscribe(self, session: _ResourceUpdateSession) -> None:
         with self._lock:
@@ -262,11 +261,12 @@ def create_server(
 
     tool_budget = ToolConcurrencyBudget(service.concurrency_limits)
     shutdown_limiter = anyio.CapacityLimiter(1)
+    resources = ShellResourceAdapter(service)
     overview_hub = _OverviewSubscriptionHub()
 
     @asynccontextmanager
     async def lifespan(_: Server[ShellToolService, object]) -> AsyncIterator[ShellToolService]:
-        overview_hub.connect(service)
+        overview_hub.connect(resources)
         try:
             async with anyio.create_task_group() as notifications:
                 notifications.start_soon(overview_hub.run)
@@ -299,51 +299,32 @@ def create_server(
 
     @configured.list_resources()  # type: ignore[no-untyped-call,misc]
     async def list_resources() -> list[types.Resource]:
-        return [
-            types.Resource(
-                uri=AnyUrl(SHELL_OVERVIEW_URI),
-                name="Shell Overview",
-                description="Current Shell states and recent execution output.",
-                mimeType="text/markdown",
-                annotations=types.Annotations(
-                    priority=0.8,
-                    audience=["assistant"],
-                ),
-                _meta={"fullscreen": False},
-            )
-        ]
+        return list(resources.list_resources())
 
     @configured.read_resource()  # type: ignore[no-untyped-call,misc]
     async def read_resource(uri: AnyUrl) -> list[ReadResourceContents]:
-        _require_overview_uri(uri)
+        result = resources.read_resource(uri)
+        content = result.contents[0]
+        if not isinstance(content, types.TextResourceContents):
+            raise TypeError("Shell Overview Resource must contain text")
         return [
             ReadResourceContents(
-                content=service.shell_overview_markdown(),
-                mime_type="text/markdown",
+                content=content.text,
+                mime_type=content.mimeType,
             )
         ]
 
     @configured.subscribe_resource()  # type: ignore[no-untyped-call,misc]
     async def subscribe_resource(uri: AnyUrl) -> None:
-        _require_overview_uri(uri)
+        resources.validate_resource_uri(uri)
         overview_hub.subscribe(configured.request_context.session)
 
     @configured.unsubscribe_resource()  # type: ignore[no-untyped-call,misc]
     async def unsubscribe_resource(uri: AnyUrl) -> None:
-        _require_overview_uri(uri)
+        resources.validate_resource_uri(uri)
         overview_hub.unsubscribe(configured.request_context.session)
 
     return configured
-
-
-def _require_overview_uri(uri: AnyUrl) -> None:
-    if str(uri) != SHELL_OVERVIEW_URI:
-        raise McpError(
-            types.ErrorData(
-                code=types.INVALID_PARAMS,
-                message="Unknown Resource URI.",
-            )
-        )
 
 
 def _create_tool_limiters(
