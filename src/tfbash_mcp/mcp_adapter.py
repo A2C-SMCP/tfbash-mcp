@@ -49,6 +49,7 @@ from tfbash_mcp.protocol import (
     validate_tool_input,
     validate_tool_output,
 )
+from tfbash_mcp.resource_adapter import SHELL_OVERVIEW_URI as SHELL_OVERVIEW_URI
 from tfbash_mcp.runtime import (
     STARTUP_COMMAND_UNSET,
     AgentContext,
@@ -63,7 +64,6 @@ from tfbash_mcp.runtime import (
 
 _LOGGER = logging.getLogger(__name__)
 
-SHELL_OVERVIEW_URI = "window://io.github.a2c-smcp.tfbash/shell-overview"
 SHELL_OVERVIEW_OUTPUT_CHARACTERS = 500
 
 TOOL_TAGS: dict[ToolName, tuple[str, ...]] = {

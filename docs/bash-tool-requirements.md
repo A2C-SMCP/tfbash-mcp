@@ -858,6 +858,9 @@ Python 嵌入模式负责：
 
 - 为每个项目创建独立 `EmbeddedShellRuntime`，并在调用前完成 project → runtime 路由；
 - 将 `runtime.list_tools()` 的七个 Tool 定义注册到宿主已有 MCP Server，将调用转发给 `await runtime.call_tool(...)`；
+- 将 `runtime.list_resources()`、`runtime.read_resource(uri)` 和
+  `runtime.subscribe_resource_updates(listener)` 桥接到宿主已有 MCP Server；listener 在产生
+  领域变化的线程同步执行，宿主负责将异步通知投递到自身事件循环；
 - 在项目关闭、功能禁用或应用退出时执行 `await runtime.aclose()`；
 - 若多个实例共享线程预算，只在同一个 AnyIO backend 和宿主事件循环中共享 `ToolConcurrencyBudget`；不得把它当成跨线程、跨事件循环或跨 asyncio/Trio backend 的全进程同步器；
 - 按需在宿主 MCP Server 注册 Shell Overview Resource。嵌入 Runtime 不创建第二个 MCP Server，也不自行注册 Resource。
@@ -894,6 +897,11 @@ Python 嵌入模式负责：
 ```python
 runtime = await EmbeddedShellRuntime.create(config, concurrency_budget=shared_budget)
 host_mcp.register_tools(runtime.list_tools(), call_handler=runtime.call_tool)
+host_mcp.register_resources(
+    runtime.list_resources(),
+    read_handler=runtime.read_resource,
+    subscribe_updates=runtime.subscribe_resource_updates,
+)
 
 # 项目关闭时
 await runtime.aclose()
@@ -962,8 +970,12 @@ stdio Server 的 CLI 配置只描述其所持有 Runtime 的运行环境：
 
 `EmbeddedShellRuntime.create()` 异步完成解析和非交互能力探测；真实受管 PTY/ConPTY 启动在首次 `shell_open` 时验证；
 `instructions`、`list_tools()` 和 `call_tool()` 分别提供宿主初始化说明、完整 Tool 定义以及
-异步调用入口。宿主必须先按项目选中实例，再转发调用；`shell_id`/`exec_id` 不能跨实例寻址。
-`aclose()` 并发幂等，清理失败后实例保持不可调用但可再次关闭重试。
+异步调用入口；`list_resources()`、`read_resource(uri)` 与
+`subscribe_resource_updates(listener)` 提供与 standalone Server 相同的 Shell Overview 描述、
+内容和事件。listener 同步运行在触发变化的 Domain/worker 线程，必须快速、线程安全且不得
+阻塞事件生产者；返回的取消函数幂等。宿主必须先按项目选中实例，再转发调用；
+`shell_id`/`exec_id` 不能跨实例寻址。`aclose()` 先停止 Resource 通知并清理监听器，再执行
+并发幂等的 Shell 清理；清理失败后实例保持不可调用但可再次关闭重试。
 
 stdio Server 启动或嵌入 Runtime 创建时把上述输入冻结为实例级 `HostConfig`。`default_cwd` 省略时等于 `workspace_root`；`shell` 是实例级严格覆盖，失败时不回退，且不会出现在 `shell_open` schema 中。`default_cwd` 和 `startup_command` 可由 `shell_open` 覆盖；`shell_open.startup_command=null` 表示仅为该 Shell 禁用宿主默认 startup command。
 
@@ -983,6 +995,7 @@ stdio Server 启动或嵌入 Runtime 创建时把上述输入冻结为实例级 
 
 - 可通过标准 stdio MCP Client 独立启动、initialize、list_tools 和 call_tool；
 - 可通过 `EmbeddedShellRuntime.create()` 非阻塞初始化，列举完全相同的七工具并异步调用；嵌入入口不创建第二个 MCP Server。
+- Embedded API 可列举、读取和订阅与 standalone 完全相同的 Shell Overview Resource；取消订阅幂等，关闭会清理监听器并停止后续通知。
 - 不导入 tfrobot-client 或 A2C-SMCP Computer 类型；
 - 删除或替换 Python 实现时工具 schema 可以保持兼容；
 - 工具入参不含 Computer 标识。
