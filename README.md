@@ -2,7 +2,7 @@
 
 面向 Agent 系统的基础 MCP 工具集合。项目希望为不同 Agent 提供一组稳定、可组合、低心智负担的通用能力，例如命令执行、文件读写与检索；具体能力优先复用成熟实现，只有现有方案无法满足核心约束时才考虑适配或自研。
 
-> 当前版本：`0.2.0`。macOS、Linux 与 Windows 11 x64 均提供七个持久 Shell 工具及
+> 当前版本：`0.2.1`。macOS、Linux 与 Windows 11 x64 均提供七个持久 Shell 工具及
 > stdio MCP Server，并可作为 Python 运行时嵌入 IDE/SDK 宿主。两种入口共享同一套七工具
 > 合同和 Shell Domain。运行时会发现并探测 Bash、Zsh 或 PowerShell，再与 POSIX PTY
 > 或 Windows ConPTY/Job Object 原生后端组合。
@@ -114,7 +114,7 @@ PyPI 发布由 [publish workflow](.github/workflows/publish.yml) 完成。它只
 `main` 后创建与版本完全一致的 `v<version>` GitHub Release，例如：
 
 ```bash
-gh release create v0.2.0 --target main --generate-notes
+gh release create v0.2.1 --target main --generate-notes
 ```
 
 Release tag 与 `pyproject.toml` 版本不一致，或 tag 指向的提交不属于 `main` 时，发布会在
